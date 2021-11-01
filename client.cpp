@@ -10,7 +10,7 @@
 #include <signal.h>
 #include <mutex>
 
-#define MAX_LEN 4096
+#define MAX_LEN 409
 
 char back_space = 8;
 
@@ -23,6 +23,9 @@ char delim2[] = "||";
 char delim3[] = " ";
 
 vector<string> stringSplit(string input, char delim[]);
+void send_message(int tracker_socket);
+void recv_message(int tracker_socket);
+
 
 class AFile
 {
@@ -55,7 +58,8 @@ public:
 	void deserialize(string data)
 	{
 		auto parts = stringSplit(data, delim1);
-		setAFile(parts[0], parts[1]);
+		float f = stof(parts[1]);
+		setAFile(parts[0], f);
 	}
 };
 
@@ -116,19 +120,19 @@ public:
 			sharedFilesInGroup.erase(gname);
 	}
 
-	void deleteSharedFile(string &groupname, string &filename)
+void deleteSharedFile(string &groupname, string &filename)
 	{
-		for (auto fileList : sharedFilesInGroup[groupname])
-		{
+		auto fileList = sharedFilesInGroup[groupname];
+		
 			for (auto member = fileList.begin(); member != fileList.end(); ++member)
 			{
-				if (member->getFileName() == filename))
+				if (member->getFileName() == filename)
 					{
 						fileList.erase(member);
 						break;
 					}
 			}
-		}
+		
 	}
 	
 	string getName()
@@ -137,11 +141,10 @@ public:
 	}
 	bool addFile(string &filename, float filesize)
 	{
-		if (sharedFiles.count(filename) == 0)
+		if (sharedFilesInGroup.count(filename) == 0)
 			return false;
 		AFile afile(filename, filesize);
-		addFile(afile);
-		sharedFiles.insert(make_pair(afile.getFileName(), afile));
+		sharedFilesInGroup[filename].push_back(afile);
 		return true;
 	}
 	// void addFile(AFile &afile)
@@ -230,14 +233,13 @@ public:
 		server.sin_port = htons(10000);
 		server.sin_addr.s_addr = INADDR_ANY;
 		bzero(&server.sin_zero, 0);
-		startConnection();
 	}
 
 	~Socket(){
 		close(server_socket);
 	}
 
-	void startConnection()
+	void startServerConnection()
 	{
 		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
 		{
@@ -249,7 +251,7 @@ public:
 		}
 	}
 
-	int acceptConnection()
+	int acceptConnectionAtServer()
 	{
 		int client_socket;
 		struct sockaddr_in client;
@@ -259,7 +261,19 @@ public:
 			perror("accept error: ");
 			// exit(-1);
 		}
+		else
+			cout << "*|*|* " << "  " << client.sin_port << endl;
 		return client_socket;
+	}
+
+	int connectAtClient(){
+		
+		if((connect(server_socket,(struct sockaddr *)&server,sizeof(struct sockaddr_in)))==-1)
+	{
+		perror("connect: ");
+		return -1;
+	}
+	return server_socket;
 	}
 
 	void closeConnection()
@@ -316,7 +330,7 @@ int main(int argc, char **argv)
 	string tracker_ip_address, tracker_port;
 
 	if (argc > 2)
-		get_tracker_ip_and_port(argv[2], ip_address, port);
+		get_tracker_ip_and_port(argv[2], tracker_ip_address, tracker_port);
 	else if(argc > 1)
 		get_tracker_ip_and_port("tracker.txt", tracker_ip_address, tracker_port);
     else
@@ -332,6 +346,8 @@ int main(int argc, char **argv)
     peer_port = ip_parts[1];
 
 	Socket tracker(tracker_ip_address, tracker_port);
+
+	tracker_socket = tracker.connectAtClient();
 
     thread t1(send_message, tracker_socket);
 	thread t2(recv_message, tracker_socket);
@@ -364,6 +380,7 @@ void send_message_helper(string& message, int tracker_socket){
     char temp[MAX_LEN];
 	strcpy(temp, message.c_str());
     send(tracker_socket,temp,sizeof(temp),0);
+	cout << "msg sent: " << temp << endl;
 }
 
 void send_message(int tracker_socket)
@@ -375,16 +392,17 @@ void send_message(int tracker_socket)
 		cout<<"-> ";
 		char str[MAX_LEN];
 		cin.getline(str,MAX_LEN);
-
-        auto input_parts = stringSplit(str, " ");
-
+        auto input_parts = stringSplit(str, delim3);
+		cout << "tracker_login_status: " << tracker_login_status << endl;
         command = input_parts[0];
 
         if(command == "login"){
             if(input_parts.size() == 3){
+				// cout << "inside login" << endl;
                 Peer t(input_parts[1], input_parts[2], peer_ip_address, peer_port);
                 peer = t;
                 message = command + " " + peer.serializeData3();
+				// cout << "exitting login: " << message << endl;
             }
             
         }
@@ -393,12 +411,17 @@ void send_message(int tracker_socket)
                 Peer t(input_parts[1], input_parts[2], peer_ip_address, peer_port);
                 peer = t;
                 message = command + " " + peer.serializeData1();
+				cout << "inside create " << message << endl;
             }
            
         }
+		else if(command == "pass"){
+			//for debugging
+			cout << "now passing" << endl;
+			continue;
+		}
 
-
-        if(message.length() > 0){
+        if(message.length() == 0){
                 input_error();
                 continue;
             }
@@ -428,7 +451,7 @@ void recv_message(int tracker_socket)
 			continue;
         if(msg[0] == '#' and msg[1] == '#'){
             int loginStatus;
-            recv(client_socket,&loginStatus,sizeof(loginStatus),0);
+            recv(tracker_socket,&loginStatus,sizeof(loginStatus),0);
             if(loginStatus)
                 tracker_login_status = (bool) loginStatus;
         }

@@ -9,7 +9,7 @@
 #include <thread>
 #include <signal.h>
 #include <mutex>
-#define MAX_LEN 4096
+#define MAX_LEN 409
 
 int chunk_size = 1024 * 512; //512 KB
 
@@ -54,7 +54,8 @@ public:
 	void deserialize(string data)
 	{
 		auto parts = stringSplit(data, delim1);
-		setAFile(parts[0], parts[1]);
+		float size = stof(parts[1]);
+		setAFile(parts[0], size);
 	}
 };
 
@@ -106,6 +107,14 @@ public:
 		}
 	}
 
+	vector<AFile> getFileListByGroup(string& groupName){
+		return sharedFilesInGroup[groupName];
+	}
+
+	void resetAllSharedFiles(){
+		sharedFilesInGroup.clear();
+	}
+
 	bool isPresentInGroup(string &gname)
 	{
 		if (sharedFilesInGroup.count(gname))
@@ -120,17 +129,17 @@ public:
 
 	void deleteSharedFile(string &groupname, string &filename)
 	{
-		for (auto fileList : sharedFilesInGroup[groupname])
-		{
+		auto fileList = sharedFilesInGroup[groupname];
+		
 			for (auto member = fileList.begin(); member != fileList.end(); ++member)
 			{
-				if (member->getFileName() == filename))
+				if (member->getFileName() == filename)
 					{
 						fileList.erase(member);
 						break;
 					}
 			}
-		}
+		
 	}
 
 	void setIsOnline(bool status)
@@ -147,11 +156,10 @@ public:
 	}
 	bool addFile(string &filename, float filesize)
 	{
-		if (sharedFiles.count(filename) == 0)
+		if (sharedFilesInGroup.count(filename) == 0)
 			return false;
 		AFile afile(filename, filesize);
-		addFile(afile);
-		sharedFiles.insert(make_pair(afile.getFileName(), afile));
+		sharedFilesInGroup[filename].push_back(afile);
 		return true;
 	}
 	// void addFile(AFile &afile)
@@ -159,7 +167,7 @@ public:
 	// }
 
 	bool loginCondition(string& input_string){
-		auto parts = stringSplit(data, delim2);
+		auto parts = stringSplit(input_string, delim2);
 		if(parts.size() == 2 and name == parts[0] and pword == parts[1]){
 			setIsOnline(true);
 			return true;
@@ -240,8 +248,9 @@ private:
 
 	void deleteAllSharedFilesByPeer(Peer &peer)
 	{
-		for (auto plist : sharedFiles)
+		for (auto fList : peer.getFileListByGroup(groupName))
 		{
+			auto plist = sharedFiles[fList.getFileName()];
 			for (auto member = plist.begin(); member != plist.end(); ++member)
 			{
 				if (member->getName() == peer.getName())
@@ -251,6 +260,7 @@ private:
 				}
 			}
 		}
+			peer.resetAllSharedFiles();
 	}
 
 public:
@@ -267,7 +277,7 @@ public:
 				return false;
 			}
 		}
-		groupMembers.push_back(member);
+		groupMembers.push_back(peer);
 		return true;
 	}
 
@@ -278,7 +288,7 @@ public:
 		{
 			for (auto member = plist.begin(); member != plist.end(); ++member)
 			{
-				if (member->getName() == peer.getName())
+				if (member->getName() == owner.getName())
 				{
 					return false;
 				}
@@ -332,14 +342,6 @@ struct terminal
 	string peer_name;
 	int socket;
 	thread th;
-
-	void operator=(const terminal &t1)
-	{
-		id = t1.id;
-		peer_name = t1.peer_name;
-		socket = t1.socket;
-		th = (move(t1.th));
-	}
 };
 
 vector<terminal> all_peers_terminals;
@@ -372,14 +374,13 @@ public:
 		server.sin_port = htons(10000);
 		server.sin_addr.s_addr = INADDR_ANY;
 		bzero(&server.sin_zero, 0);
-		startConnection();
 	}
 
 	~Socket(){
 		close(server_socket);
 	}
 
-	void startConnection()
+	void startServerConnection()
 	{
 		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
 		{
@@ -391,7 +392,7 @@ public:
 		}
 	}
 
-	int acceptConnection()
+	int acceptConnectionAtServer()
 	{
 		int client_socket;
 		struct sockaddr_in client;
@@ -401,7 +402,19 @@ public:
 			perror("accept error: ");
 			// exit(-1);
 		}
+		else
+			cout << "*|*|* " << "  " << client.sin_port << endl;
 		return client_socket;
+	}
+
+	int connectAtClient(){
+		
+		if((connect(server_socket,(struct sockaddr *)&server,sizeof(struct sockaddr_in)))==-1)
+	{
+		perror("connect: ");
+		return -1;
+	}
+	return 1;
 	}
 
 	void closeConnection()
@@ -409,6 +422,7 @@ public:
 		// close(server_socket);
 	}
 };
+
 
 // class DeserializationMethods{
 // 	public:
@@ -460,15 +474,20 @@ int main(int argc, char **argv)
 
 	Socket tracker(ip_address, port);
 
+	tracker.startServerConnection();
+
 	while (true)
 	{
-		int client_socket = tracker.acceptConnection();
-		if (client_socket < 0)
+		int client_socket = tracker.acceptConnectionAtServer();
+		if (client_socket < 0){
+			cout << "failure in connection" << endl;
 			continue;
+		}
 		seed++;
 		thread t(handle_client, client_socket, seed);
 		lock_guard<mutex> guard(all_peers_terminals_mtx);
 		all_peers_terminals.push_back({seed, string("Anonymous"), client_socket, (move(t))});
+		// cout << "done with here" << endl;
 	}
 	for (int i = 0; i < all_peers_terminals.size(); i++)
 	{
@@ -476,7 +495,7 @@ int main(int argc, char **argv)
 			all_peers_terminals[i].th.join();
 	}
 
-	tracker.close();
+	tracker.closeConnection();
 	return 0;
 }
 
@@ -489,16 +508,16 @@ void shared_print(string str, bool endLine = true)
 		cout << endl;
 }
 
-void send_message(string message, terminal &peerThreadObj)
+void send_message(string message, terminal* &peerThreadObj)
 {
 	char temp[MAX_LEN];
 	strcpy(temp, message.c_str());
-	send(peerThreadObj.socket, temp, sizeof(temp), 0);
+	send(peerThreadObj->socket, temp, sizeof(temp), 0);
 }
 
-void send_message(int num, terminal &peerThreadObj)
+void send_message(int num, terminal* &peerThreadObj)
 {
-	send(peerThreadObj.socket, &num, sizeof(num), 0);
+	send(peerThreadObj->socket, &num, sizeof(num), 0);
 }
 
 void end_connection(int id)
@@ -516,12 +535,12 @@ void end_connection(int id)
 	}
 }
 
-void failure_case(terminal &peerThreadObject)
+void failure_case(terminal* &peerThreadObject)
 {
 	send_message("Operation Unsucessful. Try again with correct input", peerThreadObject);
 }
 
-void failure_case(terminal &peerThreadObject, vector<string>& input_in_parts)
+void failure_case(terminal* &peerThreadObject, vector<string>& input_in_parts)
 {
 	send_message("Operation Unsucessful. Try again with correct input", peerThreadObject);
 	for(auto inp: input_in_parts)
@@ -529,7 +548,7 @@ void failure_case(terminal &peerThreadObject, vector<string>& input_in_parts)
 		cerr << endl;
 }
 
-bool create_user(terminal& peerThreadObj, vector<string>& input_in_parts)
+void create_user(terminal*& peerThreadObj, vector<string>& input_in_parts)
 {
 	if(input_in_parts.size() == 1)
 		failure_case(peerThreadObj, input_in_parts);
@@ -543,7 +562,7 @@ bool create_user(terminal& peerThreadObj, vector<string>& input_in_parts)
 			lck.unlock();
 
 			lock_guard<mutex> guard(all_peers_terminals_mtx);
-			peerThreadObj.peer_name = newPear.getName();
+			peerThreadObj->peer_name = newPear.getName();
 		}
 		else{
 			send_message("Incorrect input.", peerThreadObj);
@@ -552,9 +571,9 @@ bool create_user(terminal& peerThreadObj, vector<string>& input_in_parts)
 	}
 }
 
-void login(terminal &peerThreadObj, vector<string> &input_in_parts, bool& is_login_success)
+void login(terminal* &peerThreadObj, vector<string> &input_in_parts, bool& is_login_success)
 {
-	string pname = peerThreadObj.peer_name;
+	string pname = peerThreadObj->peer_name;
 	if (all_peers.count(pname) == 0 or input_in_parts.size() == 1)
 		failure_case(peerThreadObj, input_in_parts);
 	else{
@@ -586,24 +605,27 @@ void handle_client(int client_socket, int id)
 	// broadcast_message(welcome_message, id);
 	// shared_print(color(id) + welcome_message + def_col);
 
-	terminal peerThreadObj;
+	terminal* peerThreadObj;
 	for (int i = 0; i < all_peers_terminals.size(); i++)
 	{
 		if (all_peers_terminals[i].id == id)
 		{
-			peerThreadObj = all_peers_terminals[i];
+			peerThreadObj = &all_peers_terminals[i];
 			break;
 		}
 	}
-
+	// cout << "inside client " << id << endl;
 	bool is_login_success = false;
 	string inputCommand;
 
 	while (true)
 	{
+		// cout << "now waiting" << endl;
 		int bytes_received = recv(client_socket, str, sizeof(str), 0);
-		if (bytes_received <= 0)
-			return;
+		cout << "---- " << bytes_received << endl;
+		if (bytes_received < 0){
+			continue;
+		}
 		// if (strcmp(str, "#exit") == 0)
 		// {
 		// 	// Display leaving message
