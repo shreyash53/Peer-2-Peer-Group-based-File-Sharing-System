@@ -15,13 +15,13 @@ int chunk_size = 1024 * 512; //512 KB
 
 using namespace std;
 
-const char ip_port_delimiter[] = ":";	  //for ip and port diffentiation
-const char afile_data_delimiter[] = "::"; // delimiter for AFile
-const char peer_data_delimiter[] = "||";  // delimiter for Peer
-const char glbl_data_delimiter[] = " ";	  //global delimiter
-const char peer_list_delimiter[] = "&&";	//to differentiate b/w many Peer data
+char ip_port_delimiter[] = ":";		//for ip and port diffentiation
+char afile_data_delimiter[] = "::"; // delimiter for AFile
+char peer_data_delimiter[] = "||";	// delimiter for Peer
+char glbl_data_delimiter[] = " ";	//global delimiter
+char peer_list_delimiter[] = "&&";	//to differentiate b/w many Peer data
 
-const char secret_prefix[] = "$$ "	//denotes the string is not to be printed since it contains data
+char secret_prefix[] = "$$ "; //denotes the string is not to be printed since it contains data
 
 vector<string> stringSplit(string input, char delim[]);
 
@@ -79,6 +79,11 @@ private:
 	unordered_map<string, vector<AFile>> sharedFilesInGroup;
 
 	bool isOnline;
+
+	void setIsOnline(bool status)
+	{
+		isOnline = status;
+	}
 
 public:
 	Peer() {}
@@ -156,7 +161,7 @@ public:
 
 	void logout()
 	{
-		isOnline = false;
+		setIsOnline(false);
 	}
 	bool getIsOnline()
 	{
@@ -166,11 +171,12 @@ public:
 	{
 		return name;
 	}
-	
-	AFile getFileObject(string& groupname, string& filename){
-		for(auto afile: sharedFilesInGroup[groupname])
-		if(afile.getFileName() == filename)
-			return afile;
+
+	AFile getFileObject(string &groupname, string &filename)
+	{
+		for (auto afile : sharedFilesInGroup[groupname])
+			if (afile.getFileName() == filename)
+				return afile;
 	}
 
 	void addFile(AFile &afile, string &group_name)
@@ -360,19 +366,22 @@ public:
 		return msg;
 	}
 
-	bool filePresent(string& file_name){
+	bool filePresent(string &file_name)
+	{
 		return sharedFiles.count(file_name);
 	}
 
-	string getAllPeersForFileSerialized(string& filename){
+	string getAllPeersForFileSerialized(string &filename)
+	{
 		string firstPart = groupName;
 		auto afile = sharedFiles[filename][0].getFileObject(groupName, filename);
-		string secondPart = afile.serializeData()
+		string secondPart = afile.serializeData();
 		string thirdPart = "";
 		auto plist = sharedFiles[filename];
-		for(auto peer_ = plist.begin(); peer_ != plist.end(); peer_++){
-			thirdPart += peer_->serializeData1()
-			if((peer_ + 1) != plist.end())
+		for (auto peer_ = plist.begin(); peer_ != plist.end(); peer_++)
+		{
+			thirdPart += peer_->serializeData1();
+			if ((peer_ + 1) != plist.end())
 				thirdPart += peer_list_delimiter;
 		}
 		return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
@@ -862,7 +871,7 @@ void download_file(const terminal *const peerThreadObj, vector<string> &input_in
 		auto grp = all_groups[gname];
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
-			if(grp.filePresent(file_name))
+			if (grp.filePresent(file_name))
 			{
 				msg = grp.getAllPeersForFileSerialized(file_name);
 				msg = secret_prefix + msg;
@@ -929,14 +938,16 @@ void upload_file(const terminal *const peerThreadObj, vector<string> &input_in_p
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
 			AFile afile;
+
+			unique_lock<mutex> ulck(all_peers_mtx);
 			auto peer_ = all_peers[pname];
 			if (afile.deserialize(input_in_parts[2]))
 			{
-				unique_lock<mutex> ulck(all_peers_mtx);
 				peer_.addFile(afile, gname);
 				ulck.unlock();
 				lock_guard<mutex> grd(all_groups_mtx);
-				all_groups[gname].addSharedFile(afile.getFileName(), peer_);
+				string filename = afile.getFileName();
+				all_groups[gname].addSharedFile(filename, peer_);
 				msg = "Successfully Uploaded.";
 			}
 			else

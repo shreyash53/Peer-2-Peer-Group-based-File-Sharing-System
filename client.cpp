@@ -18,17 +18,16 @@ int chunk_size = 1024 * 512; //512 KB
 
 using namespace std;
 
-const char ip_port_delimiter[] = ":";	  //for ip and port diffentiation
-const char afile_data_delimiter[] = "::"; // delimiter for AFile
-const char peer_data_delimiter[] = "||";  // delimiter for Peer
-const char glbl_data_delimiter[] = " ";	  //global delimiter
+char ip_port_delimiter[] = ":";	  //for ip and port diffentiation
+char afile_data_delimiter[] = "::"; // delimiter for AFile
+char peer_data_delimiter[] = "||";  // delimiter for Peer
+char glbl_data_delimiter[] = " ";	  //global delimiter
 
-const char peer_list_delimiter[] = "&&"; //to differentiate b/w many Peer data
+char peer_list_delimiter[] = "&&"; //to differentiate b/w many Peer data
 
-const char secret_prefix[] = "$$ " //denotes the string is not to be printed since it contains data
+char secret_prefix[] = "$$ "; //denotes the string is not to be printed since it contains data
 
-	vector<string>
-	stringSplit(string input, char delim[]);
+vector<string> stringSplit(string input, char delim[]);
 void send_message(int tracker_socket);
 void recv_message(int tracker_socket);
 
@@ -174,18 +173,7 @@ public:
 	{
 		sharedFilesInGroup[group_name].push_back(afile);
 	}
-
-	bool loginCondition(string &input_string)
-	{
-		auto parts = stringSplit(input_string, peer_data_delimiter);
-		if (parts.size() == 2 and name == parts[0] and pword == parts[1])
-		{
-			setIsOnline(true);
-			return true;
-		}
-		return false;
-	}
-
+	
 	string serializeData1()
 	{
 		return name + peer_data_delimiter + pword + peer_data_delimiter + ipAddress + peer_data_delimiter + port_no;
@@ -552,7 +540,7 @@ void send_message(int tracker_socket)
 				{
 					string filename = input_parts[1];
 					string gname = input_parts[2];
-					filesize = findSizeOfFile(filename);
+					long filesize = findSizeOfFile(filename);
 					if (filesize != -1)
 					{
 						AFile afile(filename, filesize);
@@ -628,7 +616,8 @@ void recv_message(int tracker_socket)
 		{
 			cerr << "download -->> " << msg << endl;
 			auto data = stringSplit(msg, glbl_data_delimiter);
-			if(data.size() == 4){
+			if (data.size() == 4)
+			{
 				cerr << "woking it seems" << endl;
 			}
 		}
