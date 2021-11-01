@@ -36,6 +36,11 @@ public:
 	{
 	}
 
+	void setAFile(string &fileName_, float &fileSize_){
+		fileName = fileName_;
+		fileSize = fileSize_;
+	}
+
 	string getFileName()
 	{
 		return fileName;
@@ -49,7 +54,7 @@ public:
 	void deserialize(string data)
 	{
 		auto parts = stringSplit(data, delim1);
-		AFile(parts[0], parts[1]);
+		setAFile(parts[0], parts[1]);
 	}
 };
 
@@ -172,11 +177,27 @@ public:
 		return name + "||" + ipAddress + "||" + port_no;
 	}
 
+	void setPeer(string &name_, string &pword_){
+		name = name_;
+		pword = pword_;
+	}
+
+	void setPeer(string &name_, string &ipAddress_, string &port_no_){
+		name = name_;
+		ipAddress = ipAddress_;
+		port_no = port_no_;
+	}
+
+	void setPeer(string &name_, string &pword_, string &ipAddress_, string &port_no_){
+		setPeer(name_, pword_);
+		setPeer(name_, ipAddress_, port_no_);
+	}
+
 	bool deserializeData1(string data)
 	{
 		auto parts = stringSplit(data, delim2);
 		if(parts.size() == 4){
-		Peer(parts[0], parts[1], parts[2], parts[3]);
+		setPeer(parts[0], parts[1], parts[2], parts[3]);
 			return true;
 		}
 		return false;
@@ -186,7 +207,7 @@ public:
 	{
 		auto parts = stringSplit(data, delim2);
 		if(parts.size() == 3){
-		Peer(parts[0], parts[1], parts[2]);
+		setPeer(parts[0], parts[1], parts[2]);
 			return true;
 		}
 		return false;
@@ -201,7 +222,7 @@ public:
 	{
 		auto parts = stringSplit(data, delim2);
 		if(parts.size() == 2){
-		Peer(parts[0], parts[1]);
+		setPeer(parts[0], parts[1]);
 			return true;
 		}
 		return false;
@@ -354,6 +375,10 @@ public:
 		startConnection();
 	}
 
+	~Socket(){
+		close(server_socket);
+	}
+
 	void startConnection()
 	{
 		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
@@ -381,7 +406,7 @@ public:
 
 	void closeConnection()
 	{
-		close(server_socket);
+		// close(server_socket);
 	}
 };
 
@@ -534,14 +559,15 @@ void login(terminal &peerThreadObj, vector<string> &input_in_parts, bool& is_log
 		failure_case(peerThreadObj, input_in_parts);
 	else{
 		if(all_peers[pname].loginCondition(input_in_parts[1])){
-			send_message("You are successfully Logged In in the network.", peerThreadObj);
+			send_message("## You are successfully Logged In in the network.", peerThreadObj);
 			is_login_success = true;
+		send_message(1, peerThreadObj);
 		}
 		else{
 			send_message("Incorrect input.", peerThreadObj);
 			cerr << "*** " << input_in_parts[1] << endl;
 		}
-		
+			
 	}
 }
 
