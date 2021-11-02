@@ -21,11 +21,15 @@ char peer_data_delimiter[] = "||";	// delimiter for Peer
 char glbl_data_delimiter[] = " ";	//global delimiter
 char peer_list_delimiter[] = "&&";	//to differentiate b/w many Peer data
 
-char secret_prefix[] = "$$ "; //denotes the string is not to be printed since it contains data
+char secret_prefix[] = "$$"; //denotes the string is not to be printed since it contains data
+
+char server_prefix[] = "----"; //just for decoration
 
 vector<string> stringSplit(string input, char delim[]);
 
 // vector<string> deserializationCommand(string input, char delim[]);
+
+// typedef pair<string, long> pairs;
 
 class AFile
 {
@@ -51,6 +55,16 @@ public:
 		return fileName;
 	}
 
+	// pairs dumps()
+	// {
+	// 	return make_pair(fileName, fileSize);
+	// }
+
+	// void retrieve(pairs data)
+	// {
+	// 	setAFile(data.first, data.second);
+	// }
+
 	string serializeData()
 	{
 		return fileName + afile_data_delimiter + to_string(fileSize);
@@ -74,9 +88,8 @@ private:
 	string pword;
 	string ipAddress;
 	string port_no;
-	// unordered_set<string> groups;
-
-	unordered_map<string, vector<AFile>> sharedFilesInGroup;
+	unordered_map<string, pair<AFile, int>> sharedFiles;			 //key = filename and value = pair of file object and no. of groups the file is shared
+	unordered_map<string, unordered_set<string>> sharedFilesInGroup; //key = group name and value = set of filenames
 
 	bool isOnline;
 
@@ -114,22 +127,22 @@ public:
 
 	void addGroup(string &gname)
 	{
-		if (sharedFilesInGroup.count(gname))
+		if (!isPresentInGroup(gname))
 		{
-			vector<AFile> empty;
-			sharedFilesInGroup[gname] = empty;
+			unordered_set<string> e;
+			sharedFilesInGroup[gname] = e;
 		}
 	}
 
-	vector<AFile> getFileListByGroup(string &groupName)
+	unordered_set<string> getFileListByGroup(string &groupName)
 	{
 		return sharedFilesInGroup[groupName];
 	}
 
-	void resetAllSharedFiles()
-	{
-		sharedFilesInGroup.clear();
-	}
+	// void resetAllSharedFiles()
+	// {
+	// 	sharedFilesInGroup.clear();
+	// }
 
 	bool isPresentInGroup(string &gname)
 	{
@@ -137,26 +150,34 @@ public:
 			return true;
 		return false;
 	}
+
 	void deleteGroup(string &gname)
 	{
 		if (isPresentInGroup(gname))
+		{
+			for (auto file : sharedFilesInGroup[gname])
+			{
+				if (sharedFiles[file].second < 2)
+					sharedFiles.erase(file);
+				else
+					sharedFiles[file].second--;
+			}
 			sharedFilesInGroup.erase(gname);
+		}
+	}
+
+	void deleteAllSharedFilesByGroup(string &groupname)
+	{
+		for (auto filelist : sharedFilesInGroup[groupname])
+			deleteSharedFile(groupname, filelist);
 	}
 
 	void deleteSharedFile(string &groupname, string &filename)
 	{
-		auto fileList = sharedFilesInGroup[groupname];
-
-		for (auto member = fileList.begin(); member != fileList.end(); ++member)
-		{
-			if (member->getFileName() == filename)
-			{
-				fileList.erase(member);
-				if (fileList.empty())
-					sharedFilesInGroup.erase(groupname);
-				break;
-			}
-		}
+		sharedFiles[filename].second--;
+		if (sharedFiles[filename].second == 0)
+			sharedFiles.erase(filename);
+		sharedFilesInGroup[groupname].erase(filename);
 	}
 
 	void logout()
@@ -174,20 +195,44 @@ public:
 
 	AFile getFileObject(string &groupname, string &filename)
 	{
-		for (auto afile : sharedFilesInGroup[groupname])
-			if (afile.getFileName() == filename)
-				return afile;
+		cerr << "here in getFileObject" << endl;
+		for (auto de : sharedFilesInGroup[groupname])
+			cerr << de << ", ";
+		cerr << endl;
+		if (sharedFilesInGroup[groupname].count(filename))
+			return sharedFiles[filename].first;
+		cerr << "failed to find file obj for - " << groupname << ", " << filename << endl;
+		return AFile();
 	}
 
 	void addFile(AFile &afile, string &group_name)
 	{
-		sharedFilesInGroup[group_name].push_back(afile);
+		cerr << "here in addfile" << endl;
+		// for(auto de: sharedFilesInGroup[group_name])
+		// 	cerr << de << ", ";
+		// 	cerr << endl;
+		if (sharedFilesInGroup[group_name].count(afile.getFileName()))
+			return;
+		// cerr << "now adding.." << endl;
+		sharedFilesInGroup[group_name].insert(afile.getFileName());
+		if (sharedFiles.count(afile.getFileName()))
+			sharedFiles[afile.getFileName()].second++;
+		else
+			sharedFiles[afile.getFileName()] = make_pair(afile, 1);
+		for (auto de : sharedFilesInGroup[group_name])
+			cerr << de << ", ";
+		cerr << endl;
+		cerr << "now other" << endl;
+		for (auto de : sharedFiles)
+			cerr << de.first << " " << de.second.first.serializeData() << de.second.second << " => ";
+		cerr << endl;
 	}
 
 	bool loginCondition(string &input_string)
 	{
 		auto parts = stringSplit(input_string, peer_data_delimiter);
-		if (parts.size() == 2 and name == parts[0] and pword == parts[1])
+		cerr << "logincondition: " << parts.size() << " " << this->isOnline << endl;
+		if (parts.size() == 2 and name == parts[0] and pword == parts[1] and !isOnline)
 		{
 			setIsOnline(true);
 			return true;
@@ -261,6 +306,29 @@ public:
 		}
 		return false;
 	}
+
+	string dumps()
+	{
+		string msg = serializeData3() + "==>\n";
+		bool flag = true;
+		for (auto file_ : sharedFiles)
+		{
+			msg += file_.second.first.serializeData() + "--" + to_string(file_.second.second) + ",  ";
+			flag = false;
+		}
+		if (flag)
+			msg += "no file";
+		msg += "\n";
+		flag = true;
+		for (auto fl : sharedFilesInGroup)
+		{
+			msg += fl.first + ", ";
+			flag = false;
+		}
+		if (flag)
+			msg += "No Group\n";
+		return msg;
+	}
 };
 
 class Group
@@ -268,27 +336,28 @@ class Group
 private:
 	string groupName;
 	string groupAdmin;
-	vector<Peer> groupMembers;
-	unordered_map<string, vector<Peer>> sharedFiles;
+	unordered_map<string, Peer> groupMembers;				  //key == peer name and value = peer object
+	unordered_map<string, unordered_set<string>> sharedFiles; //key = file name and value = set of strings peer name
 
 	void deleteAllSharedFilesByPeer(Peer &peer)
 	{
-		for (auto fList : peer.getFileListByGroup(groupName))
+
+		for (auto filename : peer.getFileListByGroup(groupName))
 		{
-			auto plist = sharedFiles[fList.getFileName()];
-			for (auto member = plist.begin(); member != plist.end(); ++member)
+			if (sharedFiles.count(filename) and sharedFiles[filename].count(peer.getName()))
 			{
-				if (member->getName() == peer.getName())
+				if (sharedFiles[filename].size() < 2)
 				{
-					plist.erase(member);
-					break;
+					sharedFiles.erase(filename);
 				}
+				else
+					sharedFiles[filename].erase(peer.getName());
 			}
 		}
-		peer.resetAllSharedFiles();
 	}
 
 public:
+	Group() {}
 	Group(string &groupName_, string &groupAdmin_) : groupName(groupName_), groupAdmin(groupAdmin_)
 	{
 	}
@@ -298,43 +367,63 @@ public:
 		return groupAdmin == name;
 	}
 
+	string serialize()
+	{
+		string res = groupName + "=" + groupAdmin + " -> \n";
+		res += "members: ";
+		for (auto gm : groupMembers)
+			res += gm.second.serializeData3() + " ";
+		res += "\nfiles: ";
+		for (auto sf : sharedFiles)
+			res += sf.first + ", ";
+		return res;
+	}
+
+	unordered_set<string> getSetOfPeerNamesByFile(string &filename)
+	{
+		return sharedFiles[filename];
+	}
+
+	int getNoOfPeersWithFile(string &filename)
+	{
+		if (sharedFiles.count(filename))
+			return sharedFiles[filename].size();
+		return -1;
+	}
+
 	bool addGroupMember(Peer &peer)
 	{
-		for (auto member = groupMembers.begin(); member != groupMembers.end(); ++member)
-		{
-			if (member->getName() == peer.getName())
-			{
-				return false;
-			}
-		}
+		// for (auto member = groupMembers.begin(); member != groupMembers.end(); ++member)
+		// {
+		// 	if (member->getName() == peer.getName())
+		// 	{
+		// 		return false;
+		// 	}
+		// }
 		if (groupAdmin == "")
 			groupAdmin = peer.getName();
-		groupMembers.push_back(peer);
+		// groupMembers.push_back(peer);
+		if (groupMembers.count(peer.getName()))
+			return false;
+		groupMembers[peer.getName()] = peer;
 		return true;
 	}
 
 	bool addSharedFile(string &filename, Peer &owner)
 	{
-		auto plist = sharedFiles[filename];
-		if (!plist.empty())
-		{
-			for (auto member = plist.begin(); member != plist.end(); ++member)
-			{
-				if (member->getName() == owner.getName())
-				{
-					return false;
-				}
-			}
-		}
-		plist.push_back(owner);
+		if (sharedFiles[filename].count(owner.getName()))
+			return false;
+		sharedFiles[filename].insert(owner.getName());
 		return true;
 	}
 
 	bool isMember(string &peer_name)
 	{
-		for (auto peer_ : groupMembers)
-			if (peer_.getName() == peer_name)
-				return true;
+		// for (auto peer_ : groupMembers)
+		// 	if (peer_.getName() == peer_name)
+		// 		return true;
+		if (groupMembers.count(peer_name))
+			return true;
 		return false;
 	}
 
@@ -342,17 +431,14 @@ public:
 	{
 		if (filePresent(filename))
 		{
-			auto plist = sharedFiles[filename];
-			for (auto member = plist.begin(); member != plist.end(); ++member)
+			cerr << "in delete shared file : file found" << endl;
+
+			if (sharedFiles[filename].count(peer.getName()))
 			{
-				if (member->getName() == peer.getName())
-				{
-					plist.erase(member);
-					if (plist.empty())
-						sharedFiles.erase(filename);
-					peer.deleteSharedFile(groupName, filename);
-					return true;
-				}
+				sharedFiles[filename].erase(peer.getName());
+				if (sharedFiles[filename].empty())
+					sharedFiles.erase(filename);
+				return true;
 			}
 		}
 		return false;
@@ -374,15 +460,20 @@ public:
 	string getAllPeersForFileSerialized(string &filename)
 	{
 		string firstPart = groupName;
-		auto afile = sharedFiles[filename][0].getFileObject(groupName, filename);
-		string secondPart = afile.serializeData();
+		string secondPart = "";
+		int i = 0;
 		string thirdPart = "";
-		auto plist = sharedFiles[filename];
-		for (auto peer_ = plist.begin(); peer_ != plist.end(); peer_++)
+		int n = sharedFiles[filename].size();
+		cerr << "inside all peers for file : " << endl;
+		for (auto peer : sharedFiles[filename])
 		{
-			thirdPart += peer_->serializeData1();
-			if ((peer_ + 1) != plist.end())
+			cerr << "peer - " << peer << endl;
+			if (i == 0)
+				secondPart = groupMembers[peer].getFileObject(groupName, filename).serializeData();
+			thirdPart += groupMembers[peer].serializeData1();
+			if (i + 1 < n)
 				thirdPart += peer_list_delimiter;
+			i++;
 		}
 		return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
 	}
@@ -394,24 +485,35 @@ public:
 
 	bool deleteGroupMember(Peer &peer)
 	{
-		for (auto member = groupMembers.begin(); member != groupMembers.end(); ++member)
+		// for (auto member = groupMembers.begin(); member != groupMembers.end(); ++member)
+		// {
+		// 	if (member->getName() == peer.getName())
+		// 	{
+
+		if (groupMembers.count(peer.getName()))
 		{
-			if (member->getName() == peer.getName())
+			if (peer.getName() == groupAdmin)
 			{
-				if (peer.getName() == groupAdmin)
+				if (groupMembers.size() == 1)
 				{
-					if (groupMembers.size() == 1)
-					{
-						groupAdmin = "";
-					}
-					else
-						groupAdmin = (member + 1)->getName();
+					groupAdmin = "";
 				}
-				groupMembers.erase(member);
-				deleteAllSharedFilesByPeer(peer);
-				peer.deleteGroup(groupName);
-				return true;
+				else
+				{
+					for (auto peer_ : groupMembers)
+					{
+						if (peer_.first != peer.getName())
+						{
+							groupAdmin = peer_.first;
+							break;
+						}
+					}
+				}
 			}
+			deleteAllSharedFilesByPeer(peer);
+			groupMembers.erase(peer.getName());
+
+			return true;
 		}
 		return false;
 	}
@@ -427,12 +529,12 @@ struct terminal
 
 unordered_map<string, Peer> all_peers;
 unordered_map<string, Group> all_groups;
-unordered_map<string, vector<Peer>> all_requests;
+unordered_map<string, unordered_set<string>> all_requests; //key = group name and value = set of peer names
 
 vector<terminal> all_peers_terminals;
 
 int seed = 0;
-mutex cout_mtx, all_peers_mtx, all_peers_terminals_mtx, all_requests_mtx, all_groups_mtx;
+mutex cout_mtx, all_peers_mtx, all_peers_terminals_mtx, all_requests_mtx, all_groups_mtx, peer_thread_mtx;
 
 // void set_name(int id, char name[]);
 // void broadcast_message(string message, int sender_id);
@@ -471,10 +573,12 @@ public:
 		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
 		{
 			perror("bind error: ");
+			exit(-1);
 		}
 		if ((listen(server_socket, 8)) == -1)
 		{
 			perror("listen error: ");
+			exit(-1);
 		}
 	}
 
@@ -510,11 +614,6 @@ public:
 		// close(server_socket);
 	}
 };
-
-// class DeserializationMethods{
-// 	public:
-// 	static
-// };
 
 vector<string> stringSplit(string input, char delim[])
 {
@@ -673,9 +772,9 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 
 			lck.unlock();
 
-			unique_lock<mutex> ulck(all_peers_terminals_mtx);
+			// unique_lock<mutex> ulck(peer_thread_mtx);
 			peerThreadObj->peer_name = newPear.getName();
-			ulck.unlock();
+			// ulck.unlock();
 			send_message("User successfully created.", peerThreadObj);
 		}
 		else
@@ -689,20 +788,27 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 void login(const terminal *const peerThreadObj, vector<string> &input_in_parts, bool &is_login_success)
 {
 	string pname = peerThreadObj->peer_name;
-	if (all_peers.count(pname) == 0 or input_in_parts.size() == 1)
+
+	if (input_in_parts.size() == 1)
 		failure_case(peerThreadObj, input_in_parts);
+	else if (!userPresent(pname))
+	{
+		send_message("You are signed up", peerThreadObj);
+	}
 	else
 	{
+		unique_lock<mutex> ulck(all_peers_mtx);
 		if (all_peers[pname].loginCondition(input_in_parts[1]))
 		{
+			ulck.unlock();
 			send_message("## You are successfully Logged In in the network.", peerThreadObj);
 			is_login_success = true;
-			send_message(1, peerThreadObj);
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 		}
 		else
 		{
-			send_message("Incorrect input.", peerThreadObj);
-			cerr << "*** " << input_in_parts[1] << endl;
+			send_message("Incorrect credentials or already logged in.", peerThreadObj);
+			cerr << "Failed to log in " << input_in_parts[1] << endl;
 		}
 	}
 }
@@ -717,7 +823,7 @@ void join_group(const terminal *const peerThreadObj, vector<string> &input_in_pa
 		if (groupPresent(gname))
 		{
 			lock_guard<mutex> lck(all_groups_mtx);
-			all_requests[gname].push_back(all_peers[pname]);
+			all_requests[gname].insert(pname);
 			msg = "Request Recieved. Wait for approval.";
 		}
 		else
@@ -733,14 +839,19 @@ void create_group(const terminal *const peerThreadObj, vector<string> &input_in_
 		string pname = peerThreadObj->peer_name;
 		string gname = input_in_parts[1];
 		string msg;
+		bool responseFlag = false;
 		if (!groupPresent(gname))
 		{
 			Group newGroup(gname, pname);
 			if (newGroup.addGroupMember(all_peers[pname]))
 			{
-				lock_guard<mutex> lck(all_groups_mtx);
+				unique_lock<mutex> lck(all_groups_mtx);
 				all_groups[gname] = newGroup;
-				msg = "Group successfully created with you as admin.";
+				lck.unlock();
+				lock_guard<mutex> grd(all_peers_mtx);
+				all_peers[pname].addGroup(gname);
+				msg = "## Group successfully created with you as admin.";
+				responseFlag = true;
 			}
 			else
 				msg = "You are already a member. Cannot join again";
@@ -748,6 +859,8 @@ void create_group(const terminal *const peerThreadObj, vector<string> &input_in_
 		else
 			msg = "Group with this name already present";
 		send_message(msg, peerThreadObj);
+		if (responseFlag)
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
 
@@ -758,13 +871,11 @@ void leave_group(const terminal *const peerThreadObj, vector<string> &input_in_p
 		string pname = peerThreadObj->peer_name;
 		string gname = input_in_parts[1];
 		string msg;
-		bool flag = true;
+		bool flag = true, responseFlag = false;
 		if (groupPresent(gname))
 		{
-
-			auto group_ = all_groups[gname];
-			auto peer_ = all_peers[pname];
-			if (group_.getNoOfMembers() == 1)
+			cerr << "here in leave_group" << endl;
+			if (all_groups[gname].getNoOfMembers() == 1)
 			{
 				unique_lock<mutex> ulck(all_groups_mtx);
 
@@ -772,21 +883,40 @@ void leave_group(const terminal *const peerThreadObj, vector<string> &input_in_p
 				ulck.unlock();
 
 				lock_guard<mutex> lck(all_peers_mtx);
-				peer_.deleteGroup(gname);
+				all_peers[pname].deleteGroup(gname);
+				cerr << "inside first condition in leave_group: after deletion" << endl;
 			}
-			else if (group_.getNoOfMembers() > 1)
+			else if (all_groups[gname].getNoOfMembers() > 1)
 			{
-				lock_guard<mutex> lck(all_groups_mtx);
-				if (!group_.deleteGroupMember(peer_))
+				unique_lock<mutex> lck(all_groups_mtx);
+				if (!all_groups[gname].deleteGroupMember(all_peers[pname]))
+				{
 					msg = "You are not part of the group.";
+					flag = false;
+					cerr << "here in 2.a in leave_group" << endl;
+				}
+				else
+				{
+					lck.unlock();
+					lock_guard<mutex> lgd(all_peers_mtx);
+					all_peers[pname].deleteGroup(gname);
+					cerr << "2.b : deleted successfully group member" << endl;
+				}
 			}
+			else
+				cerr << "third condition in leave_group" << endl;
 
 			if (flag)
-				msg = "You are no longer in the group. All files shared by you have been removed.";
+			{
+				msg = "## You are no longer in the group. All files shared by you have been removed.";
+				responseFlag = true;
+			}
 		}
 		else
 			msg = "No Such Group";
 		send_message(msg, peerThreadObj);
+		if (responseFlag)
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
 
@@ -801,14 +931,13 @@ void requests_list_requests(const terminal *const peerThreadObj, vector<string> 
 
 		if (query == "list_requests" and groupPresent(gname))
 		{
-			lock_guard<mutex> lck(all_requests_mtx);
-			auto peer_request_list = all_requests[gname];
-			if (!peer_request_list.empty())
+			// lock_guard<mutex> lck(all_requests_mtx);
+			if (all_requests.count(gname) and !all_requests[gname].empty())
 			{
 				msg = "All peers requesting to join are:\n";
-				for (auto member : peer_request_list)
+				for (auto member : all_requests[gname])
 				{
-					msg += member.getName() + "\n";
+					msg += member + "\n";
 				}
 			}
 			else
@@ -832,22 +961,25 @@ void accept_group_request(const terminal *const peerThreadObj, vector<string> &i
 		if (userPresent(uname) and groupPresent(gname) and all_groups[gname].isAdmin(pname))
 		{
 			bool flag = true;
-			unique_lock<mutex> ulck(all_requests_mtx);
-			auto pending_reqs = all_requests[gname];
-			for (auto req = pending_reqs.begin(); req != pending_reqs.end(); req++)
+
+			if (all_requests[gname].count(uname))
 			{
-				if (req->getName() == uname)
-				{
-					flag = false;
-					pending_reqs.erase(req);
-					ulck.unlock();
-					lock_guard<mutex> grd(all_groups_mtx);
-					if (all_groups[gname].addGroupMember(all_peers[uname]))
-						msg = "Added Successfully.";
-					else
-						msg = "Already Added.";
-					break;
-				}
+				flag = false;
+				unique_lock<mutex> ulck(all_requests_mtx);
+				all_requests[gname].erase(uname);
+				if (all_requests[gname].empty())
+					all_requests.erase(gname);
+				cerr << "element deleted from requests" << endl;
+				ulck.unlock();
+				unique_lock<mutex> grd(all_groups_mtx);
+				if (all_groups[gname].addGroupMember(all_peers[uname]))
+					msg = "Added Successfully.";
+				else
+					msg = "Already Added.";
+
+				grd.unlock();
+				lock_guard<mutex> lgd(all_peers_mtx);
+				all_peers[uname].addGroup(gname);
 			}
 
 			if (flag)
@@ -859,6 +991,33 @@ void accept_group_request(const terminal *const peerThreadObj, vector<string> &i
 	}
 }
 
+string download_file_helper_serializer(string &groupName, string &filename)
+{
+	string firstPart = groupName;
+	string secondPart = "";
+	int i = 0;
+	string thirdPart = "";
+	unique_lock<mutex> ulc(all_groups_mtx);
+	int n = all_groups[groupName].getNoOfPeersWithFile(filename);
+	if (n == -1)
+		return "";
+	cerr << "inside all peers for file : " << endl;
+	auto plist = all_groups[groupName].getSetOfPeerNamesByFile(filename);
+	ulc.unlock();
+	lock_guard<mutex> grd(all_peers_mtx);
+	for (auto peer : plist)
+	{
+		cerr << "peer - " << peer << endl;
+		if (i == 0)
+			secondPart = all_peers[peer].getFileObject(groupName, filename).serializeData();
+		thirdPart += all_peers[peer].serializeData2();
+		if (i + 1 < n)
+			thirdPart += peer_list_delimiter;
+		i++;
+	}
+	return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
+}
+
 void download_file(const terminal *const peerThreadObj, vector<string> &input_in_parts)
 {
 	if (test_condition(peerThreadObj, input_in_parts, 3))
@@ -867,14 +1026,24 @@ void download_file(const terminal *const peerThreadObj, vector<string> &input_in
 		string gname = input_in_parts[1];
 		string file_name = input_in_parts[2];
 		string msg;
-		lock_guard<mutex> grd(all_groups_mtx);
-		auto grp = all_groups[gname];
+		unique_lock<mutex> grd(all_groups_mtx);
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
-			if (grp.filePresent(file_name))
+			if (all_groups[gname].filePresent(file_name))
 			{
-				msg = grp.getAllPeersForFileSerialized(file_name);
-				msg = secret_prefix + msg;
+				grd.unlock();
+				cerr << "getting file for download:" << endl;
+				msg = download_file_helper_serializer(gname, file_name);
+				cerr << msg << endl;
+				if (msg.length())
+				{
+					msg = glbl_data_delimiter + msg;
+					msg = secret_prefix + msg;
+				}
+				else
+				{
+					msg = "error while finding the file.";
+				}
 			}
 			else
 				msg = "No such file available.";
@@ -898,9 +1067,8 @@ void all_groups_list(const terminal *const peerThreadObj, vector<string> &input_
 			msg = "These are the groups currently in the network:\n";
 			for (auto gps : all_groups)
 				msg += gps.first + '\n';
-
-			send_message(msg, peerThreadObj);
 		}
+		send_message(msg, peerThreadObj);
 	}
 }
 
@@ -909,21 +1077,25 @@ void all_shareable_files_in_group(const terminal *const peerThreadObj, vector<st
 	if (test_condition(peerThreadObj, input_in_parts, 2))
 	{
 		string pname = peerThreadObj->peer_name;
+		cerr << pname << " : " << endl;
 		string gname = input_in_parts[1];
 		string msg;
 		lock_guard<mutex> grd(all_groups_mtx);
+		bool responseFlag = false;
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
 			string files = all_groups[gname].getShareableFilesNames();
 			if (files.length())
-				msg = "The file list is - \n" + files;
+				msg = "## The file list is - \n" + files;
 			else
-				msg = "No file shared here currently.";
+				msg = "## No file shared here currently.";
+			responseFlag = true;
 		}
-
 		else
 			msg = "Invalid Group Id or you don\'t have permission to see its files";
 		send_message(msg, peerThreadObj);
+		if (responseFlag)
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
 
@@ -935,20 +1107,24 @@ void upload_file(const terminal *const peerThreadObj, vector<string> &input_in_p
 		string gname = input_in_parts[1];
 		string msg;
 
+		bool responseFlag = false;
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
 			AFile afile;
-
 			unique_lock<mutex> ulck(all_peers_mtx);
-			auto peer_ = all_peers[pname];
 			if (afile.deserialize(input_in_parts[2]))
 			{
-				peer_.addFile(afile, gname);
+				all_peers[pname].addFile(afile, gname);
 				ulck.unlock();
 				lock_guard<mutex> grd(all_groups_mtx);
 				string filename = afile.getFileName();
-				all_groups[gname].addSharedFile(filename, peer_);
-				msg = "Successfully Uploaded.";
+				if (all_groups[gname].addSharedFile(filename, all_peers[pname]))
+				{
+					msg = "## Successfully Uploaded.";
+					responseFlag = true;
+				}
+				else
+					msg = "This file has been already shared by you for this group.";
 			}
 			else
 				msg = "upload failure, failed to deserialize";
@@ -956,6 +1132,8 @@ void upload_file(const terminal *const peerThreadObj, vector<string> &input_in_p
 		else
 			msg = "Invalid Group Id or you don\'t have permission to see its files";
 		send_message(msg, peerThreadObj);
+		if (responseFlag)
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
 
@@ -971,7 +1149,8 @@ void logout(const terminal *const peerThreadObj, vector<string> &input_in_parts,
 		msg = "## You have been logged out.";
 		send_message(msg, peerThreadObj);
 		is_login_success = false;
-		send_message(0, peerThreadObj);
+
+		send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
 
@@ -983,74 +1162,62 @@ void stop_sharing(const terminal *const peerThreadObj, vector<string> &input_in_
 		string gname = input_in_parts[1];
 		string filename = input_in_parts[2];
 		string msg;
-		auto peer_ = all_peers[pname];
+		bool responseFlag = false;
 		if (groupPresent(gname) and isMember(gname, pname))
 		{
 			unique_lock<mutex> ulck(all_groups_mtx);
-			if (all_groups[gname].deleteSharedFile(filename, peer_))
-				msg = "File is no longer shared in that group";
+			if (all_groups[gname].deleteSharedFile(filename, all_peers[pname]))
+			{
+				ulck.unlock();
+				lock_guard<mutex> grd(all_peers_mtx);
+				all_peers[pname].deleteSharedFile(gname, filename);
+
+				msg = "## File is no longer shared in that group";
+				responseFlag = true;
+			}
 			else
 				msg = "File not listed as shared in that group";
 		}
 		else
 			msg = "invalid group id or you don\'t have permission to see its files";
 		send_message(msg, peerThreadObj);
+		if (responseFlag)
+			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 	}
 }
+
+void debug();
 
 void handle_client(int client_socket, int id)
 {
 	char name[MAX_LEN], str[MAX_LEN];
-	// recv(client_socket, name, sizeof(name), 0);
-	// set_name(id, name);
-
-	// // Display welcome message
-	// string welcome_message = string(name) + string(" has joined");
-	// broadcast_message("#NULL", id);
-	// broadcast_message(id, id);
-	// broadcast_message(welcome_message, id);
-	// shared_print(color(id) + welcome_message + def_col);
 
 	terminal *peerThreadObj;
-	for (int i = 0; i < all_peers_terminals.size(); i++)
-	{
-		if (all_peers_terminals[i].id == id)
-		{
-			peerThreadObj = &all_peers_terminals[i];
-			break;
-		}
-	}
 
-	// cout << "inside client " << id << endl;
+	cout << server_prefix << glbl_data_delimiter << id << " just joined." << endl;
 	bool is_login_success = false;
 	string inputCommand;
+	// string peer_name;
 
 	while (true)
 	{
 		// cout << "now waiting" << endl;
 		int bytes_received = recv(client_socket, str, sizeof(str), 0);
-		cout << "---- " << str << endl;
+		cerr << server_prefix << glbl_data_delimiter << str << endl;
 		if (bytes_received < 0)
 		{
 			continue;
 		}
-		// if (strcmp(str, "#exit") == 0)
-		// {
-		// 	// Display leaving message
-		// 	string message = string(name) + string(" has left");
-		// 	broadcast_message("#NULL", id);
-		// 	broadcast_message(id, id);
-		// 	broadcast_message(message, id);
-		// 	shared_print(color(id) + message + def_col);
-		// 	end_connection(id);
-		// 	return;
-		// }
-		// broadcast_message(string(name), id);
-		// broadcast_message(id, id);
-		// broadcast_message(string(str), id);
-		// shared_print(color(id) + name + " : " + def_col + str);
-
-		// input = str;
+		unique_lock<mutex> grd(peer_thread_mtx);
+		for (int i = 0; i < all_peers_terminals.size(); i++)
+		{
+			if (all_peers_terminals[i].id == id)
+			{
+				peerThreadObj = &all_peers_terminals[i];
+				break;
+			}
+		}
+		grd.unlock();
 
 		auto input_in_parts = stringSplit(str, glbl_data_delimiter);
 
@@ -1060,77 +1227,134 @@ void handle_client(int client_socket, int id)
 			continue;
 		}
 
+		cerr << id << " : " << peerThreadObj->peer_name << " -> ";
 		inputCommand = input_in_parts[0];
 
-		if (inputCommand == "login")
+		if (inputCommand == secret_prefix)
 		{
-			login(peerThreadObj, input_in_parts, is_login_success);
-			// cout << "login: " << is_login_success << endl;
-		}
-		else if (inputCommand == "create_user")
-		{
-			create_user(peerThreadObj, input_in_parts);
-		}
-
-		else if (is_login_success)
-		{
-			if (inputCommand == "join_group")
+			if (input_in_parts[1] == "exit")
 			{
-				join_group(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "create_group")
-			{
-				create_group(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "leave_group")
-			{
-				leave_group(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "requests")
-			{
-				requests_list_requests(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "accept_request")
-			{
-				accept_group_request(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "list_groups")
-			{
-				all_groups_list(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "list_files")
-			{
-				all_shareable_files_in_group(peerThreadObj, input_in_parts);
-			}
-			else if (inputCommand == "download_file")
-			{
-				download_file(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "upload_file")
-			{
-				upload_file(peerThreadObj, input_in_parts);
-			}
-
-			else if (inputCommand == "logout")
-			{
-				logout(peerThreadObj, input_in_parts, is_login_success);
-			}
-
-			else if (inputCommand == "stop_share")
-			{
-				stop_sharing(peerThreadObj, input_in_parts);
+				cout << server_prefix << glbl_data_delimiter << peerThreadObj->peer_name << " has ended connection" << endl;
+				end_connection(id);
+				return;
 			}
 		}
 		else
 		{
-			failure_case(peerThreadObj, input_in_parts);
+			if (inputCommand == "login")
+			{
+				login(peerThreadObj, input_in_parts, is_login_success);
+				// cout << "login: " << is_login_success << endl;
+				cerr << "inside login - " << endl;
+			}
+			else if (inputCommand == "create_user")
+			{
+				create_user(peerThreadObj, input_in_parts);
+				cerr << "inside create user" << endl;
+			}
+
+			else if (is_login_success)
+			{
+				if (inputCommand == "join_group")
+				{
+					join_group(peerThreadObj, input_in_parts);
+					cerr << "inside join group" << endl;
+				}
+
+				else if (inputCommand == "create_group")
+				{
+					create_group(peerThreadObj, input_in_parts);
+					cerr << "inside create group" << endl;
+				}
+
+				else if (inputCommand == "leave_group")
+				{
+					leave_group(peerThreadObj, input_in_parts);
+					cerr << "inside leave group" << endl;
+				}
+
+				else if (inputCommand == "requests")
+				{
+					requests_list_requests(peerThreadObj, input_in_parts);
+					cerr << "inside requests" << endl;
+				}
+
+				else if (inputCommand == "accept_request")
+				{
+					accept_group_request(peerThreadObj, input_in_parts);
+					cerr << "inside accept request" << endl;
+				}
+
+				else if (inputCommand == "list_groups")
+				{
+					all_groups_list(peerThreadObj, input_in_parts);
+					cerr << "inside list group" << endl;
+				}
+
+				else if (inputCommand == "list_files")
+				{
+					all_shareable_files_in_group(peerThreadObj, input_in_parts);
+					cerr << "inside list files" << endl;
+				}
+				else if (inputCommand == "download_file")
+				{
+					download_file(peerThreadObj, input_in_parts);
+					cerr << "inside download" << endl;
+				}
+
+				else if (inputCommand == "upload_file")
+				{
+					upload_file(peerThreadObj, input_in_parts);
+					cerr << "inside upload" << endl;
+				}
+
+				else if (inputCommand == "logout")
+				{
+					logout(peerThreadObj, input_in_parts, is_login_success);
+					cerr << "inside logout" << endl;
+				}
+
+				else if (inputCommand == "stop_share")
+				{
+					stop_sharing(peerThreadObj, input_in_parts);
+					cerr << "inside stop sharing" << endl;
+				}
+			}
+			else
+			{
+				failure_case(peerThreadObj, input_in_parts);
+			}
 		}
+		debug();
 	}
+}
+
+void debug()
+{
+	// all_peers
+	cerr << "all peers" << endl;
+	for (auto pe : all_peers)
+	{
+		cerr << pe.second.dumps() << "\t";
+	}
+	cerr << endl;
+	// all_groups
+	cerr << "all groups" << endl;
+	for (auto grp : all_groups)
+		cerr << grp.second.serialize() << "  ";
+
+	cerr << endl;
+
+	// all_requests
+	cerr << "all requests" << endl;
+	for (auto req : all_requests)
+	{
+		cerr << req.first << ":- ";
+		for (auto pe : req.second)
+		{
+			cerr << all_peers[pe].serializeData3() << " | ";
+		}
+		cerr << endl;
+	}
+	cerr << endl;
 }

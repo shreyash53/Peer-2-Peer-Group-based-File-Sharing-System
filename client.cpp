@@ -18,18 +18,21 @@ int chunk_size = 1024 * 512; //512 KB
 
 using namespace std;
 
-char ip_port_delimiter[] = ":";	  //for ip and port diffentiation
+char ip_port_delimiter[] = ":";		//for ip and port diffentiation
 char afile_data_delimiter[] = "::"; // delimiter for AFile
-char peer_data_delimiter[] = "||";  // delimiter for Peer
-char glbl_data_delimiter[] = " ";	  //global delimiter
+char peer_data_delimiter[] = "||";	// delimiter for Peer
+char glbl_data_delimiter[] = " ";	//global delimiter
 
 char peer_list_delimiter[] = "&&"; //to differentiate b/w many Peer data
 
-char secret_prefix[] = "$$ "; //denotes the string is not to be printed since it contains data
+char secret_prefix[] = "$$"; //denotes the string is not to be printed since it contains data
 
 vector<string> stringSplit(string input, char delim[]);
 void send_message(int tracker_socket);
 void recv_message(int tracker_socket);
+
+queue<vector<string>> commandsExecuted; //to ensure the result of an event oriented command is reflected
+mutex cmmds_exc_mtx;
 
 class AFile
 {
@@ -55,6 +58,16 @@ public:
 		return fileName;
 	}
 
+	// pairs dumps()
+	// {
+	// 	return make_pair(fileName, fileSize);
+	// }
+
+	// void retrieve(pairs data)
+	// {
+	// 	setAFile(data.first, data.second);
+	// }
+
 	string serializeData()
 	{
 		return fileName + afile_data_delimiter + to_string(fileSize);
@@ -78,11 +91,15 @@ private:
 	string pword;
 	string ipAddress;
 	string port_no;
-	// unordered_set<string> groups;
-
-	unordered_map<string, vector<AFile>> sharedFilesInGroup;
+	unordered_map<string, pair<AFile, int>> sharedFiles;			 //key = filename and value = pair of file object and no. of groups the file is shared
+	unordered_map<string, unordered_set<string>> sharedFilesInGroup; //key = group name and value = set of filenames
 
 	bool isOnline;
+
+	void setIsOnline(bool status)
+	{
+		isOnline = status;
+	}
 
 public:
 	Peer() {}
@@ -113,22 +130,22 @@ public:
 
 	void addGroup(string &gname)
 	{
-		if (sharedFilesInGroup.count(gname))
+		if (!isPresentInGroup(gname))
 		{
-			vector<AFile> empty;
-			sharedFilesInGroup[gname] = empty;
+			unordered_set<string> e;
+			sharedFilesInGroup[gname] = e;
 		}
 	}
 
-	vector<AFile> getFileListByGroup(string &groupName)
+	unordered_set<string> getFileListByGroup(string &groupName)
 	{
 		return sharedFilesInGroup[groupName];
 	}
 
-	void resetAllSharedFiles()
-	{
-		sharedFilesInGroup.clear();
-	}
+	// void resetAllSharedFiles()
+	// {
+	// 	sharedFilesInGroup.clear();
+	// }
 
 	bool isPresentInGroup(string &gname)
 	{
@@ -136,29 +153,39 @@ public:
 			return true;
 		return false;
 	}
+
 	void deleteGroup(string &gname)
 	{
 		if (isPresentInGroup(gname))
+		{
+			for (auto file : sharedFilesInGroup[gname])
+			{
+				if (sharedFiles[file].second < 2)
+					sharedFiles.erase(file);
+				else
+					sharedFiles[file].second--;
+			}
 			sharedFilesInGroup.erase(gname);
+		}
+	}
+
+	void deleteAllSharedFilesByGroup(string &groupname)
+	{
+		for (auto filelist : sharedFilesInGroup[groupname])
+			deleteSharedFile(groupname, filelist);
 	}
 
 	void deleteSharedFile(string &groupname, string &filename)
 	{
-		auto fileList = sharedFilesInGroup[groupname];
-
-		for (auto member = fileList.begin(); member != fileList.end(); ++member)
-		{
-			if (member->getFileName() == filename)
-			{
-				fileList.erase(member);
-				break;
-			}
-		}
+		sharedFiles[filename].second--;
+		if (sharedFiles[filename].second == 0)
+			sharedFiles.erase(filename);
+		sharedFilesInGroup[groupname].erase(filename);
 	}
 
 	void logout()
 	{
-		isOnline = false;
+		setIsOnline(false);
 	}
 	bool getIsOnline()
 	{
@@ -169,11 +196,37 @@ public:
 		return name;
 	}
 
+	AFile getFileObject(string &groupname, string &filename)
+	{
+
+		if (sharedFilesInGroup[groupname].count(filename))
+			return sharedFiles[filename].first;
+		return AFile();
+	}
+
 	void addFile(AFile &afile, string &group_name)
 	{
-		sharedFilesInGroup[group_name].push_back(afile);
+		if (sharedFilesInGroup[group_name].count(afile.getFileName()))
+			return;
+		sharedFilesInGroup[group_name].insert(afile.getFileName());
+		if (sharedFiles.count(afile.getFileName()))
+			sharedFiles[afile.getFileName()].second++;
+		else
+			sharedFiles[afile.getFileName()] = make_pair(afile, 1);
 	}
-	
+
+	bool loginCondition(string &input_string)
+	{
+		auto parts = stringSplit(input_string, peer_data_delimiter);
+		cerr << "logincondition: " << parts.size() << " " << this->isOnline << endl;
+		if (parts.size() == 2 and name == parts[0] and pword == parts[1] and !isOnline)
+		{
+			setIsOnline(true);
+			return true;
+		}
+		return false;
+	}
+
 	string serializeData1()
 	{
 		return name + peer_data_delimiter + pword + peer_data_delimiter + ipAddress + peer_data_delimiter + port_no;
@@ -239,6 +292,38 @@ public:
 			return true;
 		}
 		return false;
+	}
+
+	string dumps()
+	{
+		string msg = serializeData3() + "==>\n";
+		bool flag = true;
+		for (auto file_ : sharedFiles)
+		{
+			msg += file_.second.first.serializeData() + "--" + to_string(file_.second.second) + ",  ";
+			flag = false;
+		}
+		if (flag)
+			msg += "no file";
+		msg += "\n";
+		for (auto fl : sharedFilesInGroup)
+			msg += fl.first + ", ";
+		msg += "No Group\n";
+		return msg;
+	}
+
+	string serializeDebug()
+	{
+		string res = "";
+		for (auto ptr : sharedFiles)
+		{
+			res += ptr.first + " -> ";
+			// for(auto fi: ptr.second){
+			res += ptr.second.first.serializeData() + ", ";
+			// }
+			res += "\n";
+		}
+		return res;
 	}
 };
 
@@ -355,6 +440,18 @@ thread t_send, t_recv;
 int tracker_socket;
 string peer_ip_address, peer_port;
 
+void catch_ctrl_c(int signal)
+{
+	char str[MAX_LEN] = "$$ exit";
+	// char str[MAX_LEN]=secret_prefix + glbl_data_delimiter + "exit";
+	send(tracker_socket, str, sizeof(str), 0);
+	exit_flag = true;
+	t_send.detach();
+	t_recv.detach();
+	close(tracker_socket);
+	exit(signal);
+}
+
 int main(int argc, char **argv)
 {
 	string tracker_ip_address, tracker_port;
@@ -382,6 +479,8 @@ int main(int argc, char **argv)
 	Socket tracker(tracker_ip_address, tracker_port);
 
 	tracker_socket = tracker.connectAtClient();
+
+	signal(SIGINT, catch_ctrl_c);
 
 	thread t1(send_message, tracker_socket);
 	thread t2(recv_message, tracker_socket);
@@ -428,7 +527,7 @@ void send_message_helper(string &message, int tracker_socket)
 	char temp[MAX_LEN];
 	strcpy(temp, message.c_str());
 	send(tracker_socket, temp, sizeof(temp), 0);
-	cout << "msg sent: " << temp << endl;
+	cerr << "msg sent: " << temp << endl;
 }
 
 void send_message(int tracker_socket)
@@ -436,18 +535,21 @@ void send_message(int tracker_socket)
 	string command, message;
 	while (1)
 	{
+		if (exit_flag)
+			return;
 		message = "";
 		cout << "-> ";
 		char str[MAX_LEN];
 		cin.getline(str, MAX_LEN);
 		auto input_parts = stringSplit(str, glbl_data_delimiter);
-		cout << "tracker_login_status: " << tracker_login_status << endl;
+		cerr << "tracker_login_status: " << tracker_login_status << endl;
 		command = input_parts[0];
 
 		if (command == "login")
 		{
 			if (input_parts.size() == 3)
 			{
+				commandsExecuted.push(input_parts);
 				// cout << "inside login" << endl;
 				Peer t(input_parts[1], input_parts[2], peer_ip_address, peer_port);
 				peer = t;
@@ -462,13 +564,13 @@ void send_message(int tracker_socket)
 				Peer t(input_parts[1], input_parts[2], peer_ip_address, peer_port);
 				peer = t;
 				message = command + " " + peer.serializeData1();
-				cout << "inside create " << message << endl;
+				cerr << "inside create " << message << endl;
 			}
 		}
 		else if (command == "pass")
 		{
 			//for debugging
-			cout << "now passing" << endl;
+			cerr << "now passing" << endl;
 			continue;
 		}
 
@@ -487,6 +589,7 @@ void send_message(int tracker_socket)
 			{
 				if (input_parts.size() == 2)
 				{
+					commandsExecuted.push(input_parts);
 					message = str;
 					cerr << "inside create group - " << str << endl;
 				}
@@ -496,6 +599,7 @@ void send_message(int tracker_socket)
 			{
 				if (input_parts.size() == 2)
 				{
+					commandsExecuted.push(input_parts);
 					message = str;
 					cerr << "inside leave group - " << str << endl;
 				}
@@ -529,6 +633,8 @@ void send_message(int tracker_socket)
 			{
 				if (input_parts.size() == 2)
 				{
+					// if(!peer.isPresentInGroup(input_parts[1]))
+					commandsExecuted.push(input_parts);
 					message = str;
 					cerr << "inside list files - " << str << endl;
 				}
@@ -543,13 +649,12 @@ void send_message(int tracker_socket)
 					long filesize = findSizeOfFile(filename);
 					if (filesize != -1)
 					{
+						input_parts.push_back(to_string(filesize));
+						commandsExecuted.push(input_parts);
 						AFile afile(filename, filesize);
-						peer.addFile(afile, gname);
 						message = command + " " + gname + " " + afile.serializeData();
 						cerr << "inside upload file - " << message << endl;
 					}
-					else
-						message = "invalid file.";
 				}
 			}
 
@@ -565,6 +670,7 @@ void send_message(int tracker_socket)
 
 			else if (command == "logout")
 			{
+				commandsExecuted.push(input_parts);
 				message = command;
 				cerr << "inside logout" << endl;
 			}
@@ -577,6 +683,8 @@ void send_message(int tracker_socket)
 			{
 				if (input_parts.size() == 3)
 				{
+					commandsExecuted.push(input_parts);
+
 					message = str;
 					cerr << "inside stop share " << str << endl;
 				}
@@ -586,10 +694,11 @@ void send_message(int tracker_socket)
 		if (message.length() == 0)
 		{
 			input_error();
-			continue;
 		}
-
-		send_message_helper(message, tracker_socket);
+		else
+		{
+			send_message_helper(message, tracker_socket);
+		}
 
 		// if(strcmp(str,"#exit")==0)
 		// {
@@ -601,6 +710,7 @@ void send_message(int tracker_socket)
 	}
 }
 
+void action_event(vector<string> &);
 // Receive message
 void recv_message(int tracker_socket)
 {
@@ -625,10 +735,13 @@ void recv_message(int tracker_socket)
 		{
 			if (msg[0] == '#' and msg[1] == '#')
 			{
-				int loginStatus;
-				recv(tracker_socket, &loginStatus, sizeof(loginStatus), 0);
-				if (loginStatus)
-					tracker_login_status = (bool)loginStatus;
+				// int loginStatus;
+				char action[MAX_LEN];
+				recv(tracker_socket, action, sizeof(action), 0);
+				// if (loginStatus)
+				// 	tracker_login_status = (bool)loginStatus;
+				auto parts = stringSplit(action, glbl_data_delimiter);
+				action_event(parts);
 			}
 
 			// recv(client_socket,msg,sizeof(msg),0);
@@ -638,4 +751,91 @@ void recv_message(int tracker_socket)
 		}
 		fflush(stdout);
 	}
+}
+
+void debug();
+
+void action_event(vector<string> &parts)
+{
+	string inputCommand = parts[0];
+	int answer = stoi(parts[1]);
+	cerr << "inside action event" << endl;
+	cerr << "input command: " << inputCommand << " " << answer << endl;
+	vector<string> input_parts;
+	unique_lock<mutex> ulck(cmmds_exc_mtx);
+	while (!commandsExecuted.empty())
+	{
+		auto parts_ = commandsExecuted.front();
+		commandsExecuted.pop();
+		if (parts_[0] == inputCommand)
+		{
+			input_parts = parts_;
+			break;
+		}
+	}
+
+	cerr << "below queue " << endl;
+
+	if (input_parts.size() == 0)
+		return;
+
+	cerr << "now action start " << endl;
+
+	if (inputCommand == "login")
+	{
+		tracker_login_status = answer;
+	}
+
+	// if (inputCommand == "join_group")
+	// {
+	// 	join_group(peerThreadObj, input_in_parts);
+	// }
+
+	else if (inputCommand == "create_group" and answer)
+	{
+
+		peer.addGroup(input_parts[1]);
+	}
+
+	else if (inputCommand == "leave_group" and answer)
+	{
+		peer.deleteGroup(input_parts[1]);
+	}
+
+	// else if (inputCommand == "download_file" and answer)
+	// {
+	// 	download_file(peerThreadObj, input_in_parts);
+	// }
+
+	else if (inputCommand == "list_files" and answer)
+	{
+		if (!peer.isPresentInGroup(input_parts[1]))
+			peer.addGroup(input_parts[1]);
+	}
+
+	else if (inputCommand == "upload_file" and answer)
+	{
+		if (!peer.isPresentInGroup(input_parts[2]))
+			peer.addGroup(input_parts[2]);
+		long filesize = stol(input_parts[3]);
+		AFile afile(input_parts[1], filesize);
+		peer.addFile(afile, input_parts[2]);
+	}
+
+	else if (inputCommand == "logout" and answer)
+	{
+		tracker_login_status = false;
+	}
+
+	else if (inputCommand == "stop_share" and answer)
+	{
+		peer.deleteSharedFile(input_parts[1], input_parts[2]);
+	}
+	debug();
+}
+
+void debug()
+{
+	cerr << "peer" << endl;
+	cerr << peer.serializeDebug() << endl;
 }
