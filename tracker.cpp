@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <mutex>
 #define MAX_LEN 4096
+#define SOCKET_SIZE sizeof(struct sockaddr_in)
 
 int chunk_size = 1024 * 512; //512 KB
 
@@ -544,69 +545,75 @@ void handle_client(int client_socket, int id);
 
 class Socket
 {
-private:
-	int server_socket;
-	struct sockaddr_in server;
-
 public:
+	int socketDescriptor;
+	struct sockaddr_in socketAddr;
+
+	Socket(){}
+
 	Socket(string &ip_address, string &port)
 	{
-
-		if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+		if ((socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
 		{
-			perror("socket: ");
+			perror("socket error: ");
 			exit(-1);
 		}
-		server.sin_family = AF_INET;
-		server.sin_port = htons(10000);
-		server.sin_addr.s_addr = INADDR_ANY;
-		bzero(&server.sin_zero, 0);
+		socketAddr.sin_family = AF_INET;
+		socketAddr.sin_port = htons(stoi(port));
+		socketAddr.sin_addr.s_addr = INADDR_ANY;
+		socketAddr.sin_addr.s_addr = inet_addr(ip_address.c_str());
+		bzero(&socketAddr.sin_zero, 0);
 	}
 
 	~Socket()
 	{
-		close(server_socket);
+		close(socketDescriptor);
 	}
 
-	void startServerConnection()
-	{
-		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
+	void bindConnection(){
+		if ((bind(socketDescriptor, (struct sockaddr *)&socketAddr, SOCKET_SIZE)) == -1)
 		{
 			perror("bind error: ");
 			exit(-1);
 		}
-		if ((listen(server_socket, 8)) == -1)
+	}
+
+	void startServerConnection()
+	{
+		bindConnection();
+		if ((listen(socketDescriptor, 8)) == -1)
 		{
 			perror("listen error: ");
 			exit(-1);
 		}
 	}
 
-	int acceptConnectionAtServer()
+	void acceptConnectionAtServer(Socket* clientSocket)
 	{
-		int client_socket;
-		struct sockaddr_in client;
-		unsigned int len = sizeof(sockaddr_in);
-		if ((client_socket = accept(server_socket, (struct sockaddr *)&client, &len)) == -1)
+		unsigned long adr_size = SOCKET_SIZE;
+		if ((clientSocket->socketDescriptor = accept(socketDescriptor, (struct sockaddr *)&clientSocket->socketAddr, (socklen_t*)&adr_size)) == -1)
 		{
 			perror("accept error: ");
-			// exit(-1);
 		}
-		else
-			cout << "*|*|* "
-				 << "  " << client.sin_port << endl;
-		return client_socket;
+		else{
+			cout << "*|*|* " << "  " << clientSocket->socketAddr.sin_port << endl;
+			char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(clientSocket->socketAddr.sin_addr), ip, INET_ADDRSTRLEN);
+      
+        // "ntohs(peer_addr.sin_port)" function is 
+        // for finding port number of client
+        printf("connection established with IP : %s and PORT : %d\n", ip, ntohs(clientSocket->socketAddr.sin_port));
+		}
 	}
 
-	int connectAtClient()
+	int connectAtClient(int clientSocketDescriptor)
 	{
-
-		if ((connect(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
+		if ((connect(clientSocketDescriptor, (struct sockaddr *)&socketAddr, SOCKET_SIZE)) == -1)
 		{
 			perror("connect: ");
 			return -1;
 		}
-		return 1;
+		return 0;
 	}
 
 	void closeConnection()
@@ -662,18 +669,19 @@ int main(int argc, char **argv)
 
 	tracker.startServerConnection();
 
+	Socket client;
 	while (true)
 	{
-		int client_socket = tracker.acceptConnectionAtServer();
-		if (client_socket < 0)
+		tracker.acceptConnectionAtServer(&client);
+		if (client.socketDescriptor < 0)
 		{
 			cout << "failure in connection" << endl;
 			continue;
 		}
 		seed++;
-		thread t(handle_client, client_socket, seed);
+		thread t(handle_client, client.socketDescriptor, seed);
 		lock_guard<mutex> guard(all_peers_terminals_mtx);
-		all_peers_terminals.push_back({seed, string("Anonymous"), client_socket, (move(t))});
+		all_peers_terminals.push_back({seed, string("Anonymous"), client.socketDescriptor, (move(t))});
 		// cout << "done with here" << endl;
 	}
 	for (int i = 0; i < all_peers_terminals.size(); i++)
@@ -682,7 +690,7 @@ int main(int argc, char **argv)
 			all_peers_terminals[i].th.join();
 	}
 
-	tracker.closeConnection();
+	// tracker.closeConnection();
 	return 0;
 }
 
