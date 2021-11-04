@@ -12,7 +12,7 @@
 #define MAX_LEN 4096
 #define SOCKET_SIZE sizeof(struct sockaddr_in)
 
-int chunk_size = 1024 * 512; //512 KB
+const int chunk_size = 1024 * 512 -1; //512 KB
 
 using namespace std;
 
@@ -549,7 +549,7 @@ public:
 	int socketDescriptor;
 	struct sockaddr_in socketAddr;
 
-	Socket(){}
+	Socket() {}
 
 	Socket(string &ip_address, string &port)
 	{
@@ -570,7 +570,8 @@ public:
 		close(socketDescriptor);
 	}
 
-	void bindConnection(){
+	void bindConnection()
+	{
 		if ((bind(socketDescriptor, (struct sockaddr *)&socketAddr, SOCKET_SIZE)) == -1)
 		{
 			perror("bind error: ");
@@ -588,21 +589,23 @@ public:
 		}
 	}
 
-	void acceptConnectionAtServer(Socket* clientSocket)
+	void acceptConnectionAtServer(Socket *clientSocket)
 	{
 		unsigned long adr_size = SOCKET_SIZE;
-		if ((clientSocket->socketDescriptor = accept(socketDescriptor, (struct sockaddr *)&clientSocket->socketAddr, (socklen_t*)&adr_size)) == -1)
+		if ((clientSocket->socketDescriptor = accept(socketDescriptor, (struct sockaddr *)&clientSocket->socketAddr, (socklen_t *)&adr_size)) == -1)
 		{
 			perror("accept error: ");
 		}
-		else{
-			cout << "*|*|* " << "  " << clientSocket->socketAddr.sin_port << endl;
+		else
+		{
+			cout << "*|*|* "
+				 << "  " << clientSocket->socketAddr.sin_port << endl;
 			char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(clientSocket->socketAddr.sin_addr), ip, INET_ADDRSTRLEN);
-      
-        // "ntohs(peer_addr.sin_port)" function is 
-        // for finding port number of client
-        printf("connection established with IP : %s and PORT : %d\n", ip, ntohs(clientSocket->socketAddr.sin_port));
+			inet_ntop(AF_INET, &(clientSocket->socketAddr.sin_addr), ip, INET_ADDRSTRLEN);
+
+			// "ntohs(peer_addr.sin_port)" function is
+			// for finding port number of client
+			printf("connection established with IP : %s and PORT : %d\n", ip, ntohs(clientSocket->socketAddr.sin_port));
 		}
 	}
 
@@ -1018,9 +1021,12 @@ string download_file_helper_serializer(string &groupName, string &filename)
 		cerr << "peer - " << peer << endl;
 		if (i == 0)
 			secondPart = all_peers[peer].getFileObject(groupName, filename).serializeData();
-		thirdPart += all_peers[peer].serializeData2();
-		if (i + 1 < n)
-			thirdPart += peer_list_delimiter;
+		if (all_peers[peer].getIsOnline())
+		{
+			thirdPart += all_peers[peer].serializeData2();
+			if (i + 1 < n)
+				thirdPart += peer_list_delimiter;
+		}
 		i++;
 	}
 	return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
