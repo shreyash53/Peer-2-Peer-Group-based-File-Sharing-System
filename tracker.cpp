@@ -94,12 +94,13 @@ private:
 
 	bool isOnline;
 
+public:
+
 	void setIsOnline(bool status)
 	{
 		isOnline = status;
 	}
 
-public:
 	Peer() {}
 
 	Peer(string &name_, string &pword_) : name(name_), pword(pword_), isOnline(false)
@@ -542,6 +543,7 @@ mutex cout_mtx, all_peers_mtx, all_peers_terminals_mtx, all_requests_mtx, all_gr
 // void broadcast_message(int num, int sender_id);
 void end_connection(int id);
 void handle_client(int client_socket, int id);
+bool userPresent(string &uname);
 
 class Socket
 {
@@ -672,6 +674,8 @@ int main(int argc, char **argv)
 
 	tracker.startServerConnection();
 
+	cout << "Now starting tracker. Accepting peers..." << endl;
+
 	Socket client;
 	while (true)
 	{
@@ -724,6 +728,11 @@ void end_connection(int id)
 	{
 		if (all_peers_terminals[i].id == id)
 		{
+			if(userPresent(all_peers_terminals[i].peer_name)){
+				string uname = all_peers_terminals[i].peer_name;
+				lock_guard<mutex> lck(all_peers_mtx);
+				all_peers[uname].setIsOnline(false);
+			}
 			lock_guard<mutex> guard(all_peers_terminals_mtx);
 			all_peers_terminals[i].th.detach();
 			all_peers_terminals.erase(all_peers_terminals.begin() + i);
@@ -796,15 +805,25 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 	}
 }
 
-void login(const terminal *const peerThreadObj, vector<string> &input_in_parts, bool &is_login_success)
+void login(terminal *const peerThreadObj, vector<string> &input_in_parts, bool &is_login_success)
 {
-	string pname = peerThreadObj->peer_name;
 
-	if (input_in_parts.size() == 1)
+	if (input_in_parts.size() == 1){
 		failure_case(peerThreadObj, input_in_parts);
-	else if (!userPresent(pname))
+		return;
+	}
+	
+	Peer peer_;
+	if(!peer_.deserializeData3(input_in_parts[1]))
+		{
+			send_message("Incorrect Input - try again", peerThreadObj);
+			return;
+		}
+
+	string pname = peer_.getName();
+	if (!userPresent(pname))
 	{
-		send_message("You are signed up", peerThreadObj);
+		send_message("You aren\'t signed up", peerThreadObj);
 	}
 	else
 	{
@@ -814,6 +833,7 @@ void login(const terminal *const peerThreadObj, vector<string> &input_in_parts, 
 			ulck.unlock();
 			send_message("## You are successfully Logged In in the network.", peerThreadObj);
 			is_login_success = true;
+			peerThreadObj->peer_name = peer_.getName();
 			send_message(input_in_parts[0] + glbl_data_delimiter + "1", peerThreadObj);
 		}
 		else

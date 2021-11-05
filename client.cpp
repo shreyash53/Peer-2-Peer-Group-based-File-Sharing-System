@@ -30,8 +30,8 @@ char peer_list_delimiter[] = "&&"; //to differentiate b/w many Peer data
 char secret_prefix[] = "$$"; //denotes the string is not to be printed since it contains data
 
 vector<string> stringSplit(string input, char delim[]);
-void send_to_tracker(int tracker_socket);
-void recv_from_tracker(int tracker_socket);
+void send_to_tracker(int peer_socket_descriptor);
+void recv_from_tracker(int peer_socket_descriptor);
 void action_event(vector<string> &);
 void download_manager(int, vector<string> &);
 
@@ -349,7 +349,8 @@ public:
 	int socketDescriptor;
 	struct sockaddr_in socketAddr;
 
-	Socket() {
+	Socket()
+	{
 		if ((socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
 		{
 			perror("socket error: ");
@@ -368,7 +369,7 @@ public:
 
 	// ~Socket()
 	// {
-		
+
 	// }
 
 	void startServerConnection()
@@ -461,24 +462,26 @@ void get_tracker_ip_and_port(string file_name, string &ip_address, string &port)
 }
 
 void handle_peer(int peer_socket);
+void peer_listener_helper();
 
 Peer peer;
 
 bool exit_flag = false;
 bool tracker_login_status = false;
-thread tracker_send, tracker_recv;
-int tracker_socket;
+thread tracker_send, tracker_recv, peer_listener;
+int peer_socket_descriptor;
 string peer_ip_address, peer_port;
 
 void catch_ctrl_c(int signal)
 {
 	char str[MAX_LEN] = "$$ exit";
 	// char str[MAX_LEN]=secret_prefix + glbl_data_delimiter + "exit";
-	send(tracker_socket, str, sizeof(str), 0);
+	send(peer_socket_descriptor, str, sizeof(str), 0);
 	exit_flag = true;
 	tracker_send.detach();
 	tracker_recv.detach();
-	close(tracker_socket);
+	peer_listener.detach();
+	close(peer_socket_descriptor);
 	exit(signal);
 }
 
@@ -508,25 +511,43 @@ int main(int argc, char **argv)
 
 	Socket tracker(tracker_ip_address, tracker_port);
 
-	Socket client(peer_ip_address, peer_port);
-	tracker_socket = client.socketDescriptor;
-	client.bindConnection();
-
+	Socket client;
+	
 	if (tracker.connectAtClient(client.socketDescriptor) != 0)
 	{
 		cout << "error while connecting to tracker" << endl;
 		return -1;
 	}
+	peer_socket_descriptor = client.socketDescriptor;
 
 	signal(SIGINT, catch_ctrl_c);
 
-	thread t1(send_to_tracker, tracker_socket);
-	thread t2(recv_from_tracker, tracker_socket);
+	thread t1(send_to_tracker, peer_socket_descriptor);
+	thread t2(recv_from_tracker, peer_socket_descriptor);
+	thread t3(peer_listener_helper);
+	
 
 	tracker_send = move(t1);
 	tracker_recv = move(t2);
+	peer_listener = move(t3);
 
-	client.startServerConnection();
+
+	if (tracker_send.joinable())
+		tracker_send.join();
+	if (tracker_recv.joinable())
+		tracker_recv.join();
+	if(peer_listener.joinable())
+		peer_listener.join();
+
+	client.closeConnection();
+
+	return 0;
+}
+
+void peer_listener_helper(){
+	Socket currentPeer(peer_ip_address, peer_port);
+
+	currentPeer.startServerConnection();
 
 	Socket different_peer;
 
@@ -534,7 +555,7 @@ int main(int argc, char **argv)
 	{
 		if (exit_flag)
 			break;
-		client.acceptConnectionAtServer(&different_peer);
+		currentPeer.acceptConnectionAtServer(&different_peer);
 		if (different_peer.socketDescriptor < 0)
 		{
 			cout << "Failed connection with: " << ntohs(different_peer.socketAddr.sin_port) << endl;
@@ -544,16 +565,10 @@ int main(int argc, char **argv)
 
 		t.detach();
 	}
-
-	if (tracker_send.joinable())
-		tracker_send.join();
-	if (tracker_recv.joinable())
-		tracker_recv.join();
-
-	client.closeConnection();
-
-	return 0;
+	currentPeer.closeConnection();
 }
+
+
 
 long findSizeOfFile(string file_name)
 {
@@ -600,7 +615,7 @@ void send_away(string &message, int socket_d)
 	cerr << "msg sent: " << temp << endl;
 }
 
-void send_to_tracker(int tracker_socket)
+void send_to_tracker(int peer_socket_descriptor)
 {
 	string command, message;
 	while (1)
@@ -767,28 +782,28 @@ void send_to_tracker(int tracker_socket)
 		}
 		else
 		{
-			send_away(message, tracker_socket);
+			send_away(message, peer_socket_descriptor);
 		}
 
 		// if(strcmp(str,"#exit")==0)
 		// {
 		// 	exit_flag=true;
 		// 	tracker_recv.detach();
-		// 	close(tracker_socket);
+		// 	close(peer_socket_descriptor);
 		// 	return;
 		// }
 	}
 }
 
 // Receive message
-void recv_from_tracker(int tracker_socket)
+void recv_from_tracker(int peer_socket_descriptor)
 {
 	while (1)
 	{
 		if (exit_flag)
 			return;
 		char name[MAX_LEN], msg[MAX_LEN];
-		int bytes_received = recv(tracker_socket, msg, sizeof(msg), 0);
+		int bytes_received = recv(peer_socket_descriptor, msg, sizeof(msg), 0);
 		if (bytes_received <= 0)
 			continue;
 		if (msg[0] == '$' and msg[1] == '$')
@@ -799,7 +814,7 @@ void recv_from_tracker(int tracker_socket)
 			{
 				cout << "Download now starting -->> " << endl;
 				cerr << "woking it seems" << endl;
-				download_manager(tracker_socket, data);
+				download_manager(peer_socket_descriptor, data);
 			}
 			else
 			{
@@ -813,7 +828,7 @@ void recv_from_tracker(int tracker_socket)
 			{
 				// int loginStatus;
 				char action[MAX_LEN];
-				recv(tracker_socket, action, sizeof(action), 0);
+				recv(peer_socket_descriptor, action, sizeof(action), 0);
 				// if (loginStatus)
 				// 	tracker_login_status = (bool)loginStatus;
 				auto parts = stringSplit(action, glbl_data_delimiter);
@@ -962,7 +977,7 @@ char *get_file_chunk_buffer(string &filename, long starting_from_pos, int size_o
 	ifstream my_file(filename, ios::in | ios::binary);
 	if (!my_file.is_open())
 		return nullptr;
-	my_file.clear();
+	// my_file.clear();
 	my_file.seekg(starting_from_pos, ios::beg);
 
 	char *buffer = new char[size_of_buffer];
@@ -1060,8 +1075,6 @@ struct peers
 	}
 };
 
-
-
 // struct fileInfo{
 // 	fstream *file_ptr;	//file stream pointer of the file to be downloaded.
 // 	vector<bool> chunk_bit_map;		//chunk vector
@@ -1083,7 +1096,7 @@ mutex all_peers_ptrs_mtx, all_peers_threads_mtx, file_meta_vector_mtx;
 void download_handler(int, int);
 int seed = 0;
 
-void download_manager(int tracker_socket, vector<string> &input_parts)
+void download_manager(int peer_socket_descriptor, vector<string> &input_parts)
 {
 	seed++;
 	AFile afile;
@@ -1103,13 +1116,13 @@ void download_manager(int tracker_socket, vector<string> &input_parts)
 		pid++;
 	}
 	file_meta_vector[seed].first = afile;
-	thread t(download_handler, seed, tracker_socket);
+	thread t(download_handler, seed, peer_socket_descriptor);
 	t.detach();
 }
 
 void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size);
 
-void download_handler(int id, int tracker_socket)
+void download_handler(int id, int peer_socket_descriptor)
 {
 	// unique_lock<mutex> ulk_cerr(cerr_mtx);
 	cerr << "inside download handler - " << id << endl;
@@ -1129,20 +1142,6 @@ void download_handler(int id, int tracker_socket)
 	int one_chunk_size = chunk_size;
 	int last_chunk_size = file_size % one_chunk_size;
 	int total_chunks = (file_size / one_chunk_size) + ((last_chunk_size) ? 1 : 0);
-
-	/* fstream file_obj(afile.getFileName(), ios::out | ios::ate | ios::binary);
-
-	// ulk_cerr.lock();
-	if (file_obj.is_open())
-		cerr << "successfully opened file" << endl;
-	else
-	{
-		// unique_lock<mutex> ulk_cout(cout_mtx);
-		cerr << "error while opening file" << endl;
-		cout << "error while downloading file." << endl;
-		return;
-	}
-	// ulk_cerr.unlock(); */
 
 	unique_lock<mutex> uck(file_meta_vector_mtx);
 	// file_meta_vector[id].first = &file_obj;
@@ -1206,45 +1205,114 @@ void download_handler(int id, int tracker_socket)
 		cout << "Downloading of file: " << filename << " complete." << endl;
 	}
 
-	// file_obj.close();
 	all_peers_threads.erase(id);
 	all_peers_ptrs.erase(id);
 	file_meta_vector.erase(id);
 }
 
-int calculate_next_peer(int peer_id, int total){
-	return (peer_id+1)%(total/2);
+int calculate_next_peer(int peer_id, int total)
+{
+	return (peer_id + 1) % (total / 2);
 }
 
-void safe_log(string s){
+void safe_log(string s)
+{
 	lock_guard<mutex> lck(cerr_mtx);
 	cerr << s << endl;
 }
 
-void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size) 
+bool matchHash(int id, string hash_calculated, string hash_from_peer)
+{
+	for (int i = 0; i < SHA_DIGEST_LENGTH; i++)
+	{
+		if (hash_from_peer[i] != hash_calculated[i])
+		{
+			safe_log("hash found different of chunk - " + to_string(id));
+			return false;
+		}
+	}
+	safe_log("hash matched of chunk - " + to_string(id));
+	return true;
+}
+
+bool write_in_file(int id, int chunk_no, char *buffer, int size)
+{
+	string filename = file_meta_vector[id].first.getFileName();
+	fstream file_obj(filename, ios::out | ios::ate | ios::binary);
+
+	// ulk_cerr.lock();
+	if (file_obj.is_open())
+	{
+		safe_log("successfully opened file for chunk - " + to_string(chunk_no));
+		file_obj.seekg(chunk_no * chunk_size, ios::beg);
+		file_obj.write(buffer, size);
+		file_obj.close();
+		return true;
+	}
+	else
+	{
+		// unique_lock<mutex> ulk_cout(cout_mtx);
+		safe_log("error while opening file");
+		// cout << "error while downloading file." << endl;
+	}
+	// ulk_cerr.unlock();
+	safe_log("failed file_writing for chunk - " + chunk_no);
+	return false;
+}
+
+void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size)
 {
 	int fail_safe_total = 2 * all_peers_ptrs[id].size();
 	int fail_safe_cnt = 0;
 	Peer *peer_;
 	string ip_address, port;
 	Socket chunk_socket;
+	char *buffer = new char[chunk_size];
 	while (fail_safe_cnt < fail_safe_total)
 	{
+		safe_log("starting with peer:" + to_string(peer_id));
 		peer_ = &all_peers_ptrs[id][peer_id].peer_obj;
 		ip_address = peer_->getIPAdress();
 		port = peer_->getPortNo();
 		Socket peer_socket(ip_address, port);
 
-		if(peer_socket.connectAtClient(chunk_socket.socketDescriptor) != 0){
+		if (peer_socket.connectAtClient(chunk_socket.socketDescriptor) != 0)
+		{
 			stringstream ss;
 			ss << "failed to connect with peer:" << peer_id << " for chunk:" << chunk_no;
 			safe_log(ss.str());
 		}
-		else{
-			
+		else
+		{
+			string msg = file_meta_vector[id].first.getFileName() + glbl_data_delimiter + to_string(chunk_no);
+			send_away(msg, chunk_socket.socketDescriptor);
+			char response[MAX_LEN];
+			recv(chunk_socket.socketDescriptor, response, sizeof(response), 0);
+			if (response[0] == '#' and response[1] == '#')
+			{
+				safe_log("problem at peer occured ");
+			}
+			else
+			{
+				int bytes_rec = recv(chunk_socket.socketDescriptor, buffer, sizeof(buffer), 0);
+				if (bytes_rec <= 0)
+					safe_log("bytes not recieved");
+
+				string hash_calculated = get_chunk_hash(buffer, chunk_size);
+				char hash_from_peer[SHA_DIGEST_LENGTH];
+				recv(chunk_socket.socketDescriptor, hash_from_peer, sizeof(hash_from_peer), 0);
+
+				if (matchHash(chunk_no, hash_calculated, hash_from_peer) and write_in_file(id, chunk_no, buffer, chunk_size))
+				{
+
+					file_meta_vector[id].second[chunk_no] = true;
+					safe_log("completed for chunk - " + to_string(chunk_no));
+					break;
+				}
+			}
 		}
 
-			peer_id = calculate_next_peer(peer_id, fail_safe_total);
+		peer_id = calculate_next_peer(peer_id, fail_safe_total);
 		fail_safe_cnt++;
 	}
 	chunk_socket.closeConnection();
