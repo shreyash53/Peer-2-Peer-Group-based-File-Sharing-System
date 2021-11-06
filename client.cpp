@@ -9,6 +9,7 @@
 #include <thread>
 #include <signal.h>
 #include <mutex>
+#include <chrono>
 #include <openssl/sha.h>
 
 #define MAX_LEN 4096
@@ -16,7 +17,7 @@
 
 char back_space = 8;
 
-const int chunk_size = 1024 * 512 - 1; //512 KB
+const int CHUNK_SIZE = 1024 * 512; //512 KB
 
 using namespace std;
 
@@ -34,6 +35,7 @@ void send_to_tracker(int peer_socket_descriptor);
 void recv_from_tracker(int peer_socket_descriptor);
 void action_event(vector<string> &);
 void download_manager(int, vector<string> &);
+string get_chunk_hash(char *buffer, int size);
 
 queue<vector<string>> commandsExecuted; //to ensure the result of an event oriented command is reflected
 mutex cmmds_exc_mtx;
@@ -512,7 +514,7 @@ int main(int argc, char **argv)
 	Socket tracker(tracker_ip_address, tracker_port);
 
 	Socket client;
-	
+
 	if (tracker.connectAtClient(client.socketDescriptor) != 0)
 	{
 		cout << "error while connecting to tracker" << endl;
@@ -525,18 +527,16 @@ int main(int argc, char **argv)
 	thread t1(send_to_tracker, peer_socket_descriptor);
 	thread t2(recv_from_tracker, peer_socket_descriptor);
 	thread t3(peer_listener_helper);
-	
 
 	tracker_send = move(t1);
 	tracker_recv = move(t2);
 	peer_listener = move(t3);
 
-
 	if (tracker_send.joinable())
 		tracker_send.join();
 	if (tracker_recv.joinable())
 		tracker_recv.join();
-	if(peer_listener.joinable())
+	if (peer_listener.joinable())
 		peer_listener.join();
 
 	client.closeConnection();
@@ -544,7 +544,8 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-void peer_listener_helper(){
+void peer_listener_helper()
+{
 	Socket currentPeer(peer_ip_address, peer_port);
 
 	currentPeer.startServerConnection();
@@ -568,18 +569,26 @@ void peer_listener_helper(){
 	currentPeer.closeConnection();
 }
 
-
-
 long findSizeOfFile(string file_name)
 {
-	FILE *fp = fopen(file_name.c_str(), "r");
-	if (fp == NULL)
-	{
+	// FILE *fp = fopen(file_name.c_str(), "r");
+	// if (fp == NULL)
+	// {
+	// 	return -1;
+	// }
+	// fseek(fp, 0L, SEEK_END);
+	// long int res = ftell(fp);
+	// fclose(fp);
+	ifstream ff(file_name, ios::binary | ios::in);
+	if(!ff.is_open())
 		return -1;
-	}
-	fseek(fp, 0L, SEEK_END);
-	long int res = ftell(fp);
-	fclose(fp);
+	ff.seekg(0, ios::end);
+	long res = ff.tellg();
+	char *buffer = new char[res];
+	ff.seekg(0, ios::beg);
+	ff.read(buffer, res);
+	cerr << "The hash for " << file_name << " : " << get_chunk_hash(buffer, res) << endl;
+	ff.close();
 	return res;
 }
 
@@ -950,7 +959,27 @@ void debug()
 // }
 
 mutex cout_mtx, cerr_mtx;
+void safe_log(string s)
+{
+	lock_guard<mutex> lck(cerr_mtx);
+	cerr << s << endl;
+}
 
+bool send_away_chunk(char *buffer, int buffer_size, int socket_d)
+{
+	char *msg = buffer;
+	int num;
+	while (buffer_size > 0)
+	{
+		num = send(socket_d, msg, buffer_size, 0);
+		if (num <= 0)
+			return false;
+		msg += num;
+		buffer_size -= num;
+	}
+	// cerr << "buffer sent: " << buffer << endl;
+	return true;
+}
 void error_send(int peer_socket)
 {
 	string msg = "##error";
@@ -974,7 +1003,7 @@ string get_chunk_hash(char *buffer, int size)
 
 char *get_file_chunk_buffer(string &filename, long starting_from_pos, int size_of_buffer)
 {
-	ifstream my_file(filename, ios::in | ios::binary);
+	ifstream my_file(filename, ios::binary | ios::in);
 	if (!my_file.is_open())
 		return nullptr;
 	// my_file.clear();
@@ -993,9 +1022,15 @@ void send_chunk_response(int bytes_to_read, int peer_socket, char *buffer, strin
 
 	send_away(bytes, peer_socket);
 
-	send_away(buffer, bytes_to_read, peer_socket);
+	if (send_away_chunk(buffer, bytes_to_read, peer_socket))
 
-	send_away(chunk_hash, peer_socket);
+	{
+		send_away(chunk_hash, peer_socket);
+	}
+	else
+	{
+		cerr << "error while sending chunk" << endl;
+	}
 }
 
 void handle_peer(int peer_socket)
@@ -1030,8 +1065,8 @@ void handle_peer(int peer_socket)
 	long file_size = peer.getFileObject(filename).getFileSize();
 
 	//find the total no of chunks of this file
-	int last_chunk_size = file_size % chunk_size;
-	int total_chunks = (file_size / chunk_size) + ((last_chunk_size) ? 1 : 0);
+	int last_chunk_size = file_size % CHUNK_SIZE;
+	int total_chunks = (file_size / CHUNK_SIZE) + ((last_chunk_size) ? 1 : 0);
 
 	int bytes_to_read;
 
@@ -1042,10 +1077,10 @@ void handle_peer(int peer_socket)
 	}
 	else
 	{ //if it is not the last chunk
-		bytes_to_read = chunk_size;
+		bytes_to_read = CHUNK_SIZE;
 	}
 
-	char *buffer = get_file_chunk_buffer(filename, fileChunkNo * chunk_size, bytes_to_read);
+	char *buffer = get_file_chunk_buffer(filename, fileChunkNo * CHUNK_SIZE, bytes_to_read);
 
 	if (!buffer)
 	{
@@ -1093,16 +1128,30 @@ unordered_map<int, pair<
 
 mutex all_peers_ptrs_mtx, all_peers_threads_mtx, file_meta_vector_mtx;
 
+bool file_creation(string file_name){
+	ofstream ff(file_name);
+	if(!ff.is_open()){
+		return false;
+	}
+	
+		ff.close();
+		return true;
+}
+
 void download_handler(int, int);
 int seed = 0;
 
 void download_manager(int peer_socket_descriptor, vector<string> &input_parts)
 {
-	seed++;
 	AFile afile;
-	afile.deserialize(input_parts[2]);
+	if(!(afile.deserialize(input_parts[2]) and file_creation(afile.getFileName()))){
+		cerr << "error while downloading file meta deserialization" << endl;
+		cout << "Download failed" << endl;
+		return;
+	}
+	
 	auto peer_list = stringSplit(input_parts[3], peer_list_delimiter);
-
+	seed++;
 	int peer_list_size = peer_list.size();
 
 	int pid = 0;
@@ -1118,6 +1167,7 @@ void download_manager(int peer_socket_descriptor, vector<string> &input_parts)
 	file_meta_vector[seed].first = afile;
 	thread t(download_handler, seed, peer_socket_descriptor);
 	t.detach();
+	// t.join();
 }
 
 void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size);
@@ -1139,7 +1189,7 @@ void download_handler(int id, int peer_socket_descriptor)
 	string filename = file_meta_vector[id].first.getFileName();
 	int file_size = file_meta_vector[id].first.getFileSize();
 
-	int one_chunk_size = chunk_size;
+	int one_chunk_size = CHUNK_SIZE;
 	int last_chunk_size = file_size % one_chunk_size;
 	int total_chunks = (file_size / one_chunk_size) + ((last_chunk_size) ? 1 : 0);
 
@@ -1152,19 +1202,22 @@ void download_handler(int id, int peer_socket_descriptor)
 
 	for (int chunk_no = 0, peer_id = 0; chunk_no < total_chunks; chunk_no++, peer_id = (peer_id + 1) % peer_list_size)
 	{
-		lock_guard<mutex> grd(all_peers_threads_mtx);
 		if (chunk_no == total_chunks - 1 and last_chunk_size)
 			one_chunk_size = last_chunk_size;
 		thread th(chunk_download_handler, id, chunk_no, peer_id, one_chunk_size);
-		lock_guard<mutex> lcd_guard(all_peers_threads_mtx);
+		// unique_lock<mutex> lcd_guard(all_peers_threads_mtx);
 		all_peers_threads[id].push_back(move(th));
+		// lcd_guard.unlock();
+		safe_log("in loop, chunk " + to_string(chunk_no) + ", with peer " + to_string(peer_id));
 	}
 
 	// unique_lock<mutex> ucK(all_peers_threads_mtx);
 	for (int cnt = 0; cnt < all_peers_threads[id].size(); cnt++)
 	{
-		if (all_peers_threads[id][cnt].joinable())
+		if(all_peers_threads[id][cnt].joinable())
 			all_peers_threads[id][cnt].join();
+		else
+			cerr << "can\'t join - " << cnt << endl;
 	}
 	// uck.unlock();
 
@@ -1203,6 +1256,7 @@ void download_handler(int id, int peer_socket_descriptor)
 		//download successfull
 		cerr << "Download successful " << endl;
 		cout << "Downloading of file: " << filename << " complete." << endl;
+		findSizeOfFile(filename);
 	}
 
 	all_peers_threads.erase(id);
@@ -1212,14 +1266,9 @@ void download_handler(int id, int peer_socket_descriptor)
 
 int calculate_next_peer(int peer_id, int total)
 {
-	return (peer_id + 1) % (total / 2);
+	return (peer_id + 1) % (total);
 }
 
-void safe_log(string s)
-{
-	lock_guard<mutex> lck(cerr_mtx);
-	cerr << s << endl;
-}
 
 bool matchHash(int id, string hash_calculated, string hash_from_peer)
 {
@@ -1238,13 +1287,13 @@ bool matchHash(int id, string hash_calculated, string hash_from_peer)
 bool write_in_file(int id, int chunk_no, char *buffer, int size)
 {
 	string filename = file_meta_vector[id].first.getFileName();
-	fstream file_obj(filename, ios::out | ios::ate | ios::binary);
+	ofstream file_obj(filename, ios::binary | ios::out | ios::in);
 
 	// ulk_cerr.lock();
 	if (file_obj.is_open())
 	{
 		safe_log("successfully opened file for chunk - " + to_string(chunk_no));
-		file_obj.seekg(chunk_no * chunk_size, ios::beg);
+		file_obj.seekp(chunk_no * CHUNK_SIZE, ios::beg);
 		file_obj.write(buffer, size);
 		file_obj.close();
 		return true;
@@ -1260,9 +1309,29 @@ bool write_in_file(int id, int chunk_no, char *buffer, int size)
 	return false;
 }
 
+bool recieve_chunk(int socket_descriptor, char *buffer, int size)
+{	safe_log("now recieving chunk..");
+	int num;
+	char *pbuf = buffer;
+	while (size > 0)
+	{
+		num = recv(socket_descriptor, pbuf, size, 0);
+		if (num <= 0)
+			return false;
+		// cerr << pbuf << endl;
+		safe_log("recieved bytes" + to_string(num));
+
+		pbuf += num;
+		size -= num;
+	}
+	return true;
+}
+
 void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size)
 {
-	int fail_safe_total = 2 * all_peers_ptrs[id].size();
+	safe_log("starting for chunk - " + to_string(chunk_no) + " for peer "  + to_string(peer_id));
+	int total_peers = all_peers_ptrs[id].size();
+	int fail_safe_total = 4 * total_peers;
 	int fail_safe_cnt = 0;
 	Peer *peer_;
 	string ip_address, port;
@@ -1294,26 +1363,38 @@ void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size)
 			}
 			else
 			{
-				int bytes_rec = recv(chunk_socket.socketDescriptor, buffer, sizeof(buffer), 0);
-				if (bytes_rec <= 0)
-					safe_log("bytes not recieved");
+				// int bytes_rec = recv(chunk_socket.socketDescriptor, buffer, sizeof(buffer), 0);
 
+				if (!recieve_chunk(chunk_socket.socketDescriptor, buffer, chunk_size))
+				{
+					safe_log("Failed to recieve chunk " + to_string(chunk_no));
+					break;
+				}
+				// safe_log(buffer);
+				// cerr << buffer << endl;
 				string hash_calculated = get_chunk_hash(buffer, chunk_size);
 				char hash_from_peer[SHA_DIGEST_LENGTH];
 				recv(chunk_socket.socketDescriptor, hash_from_peer, sizeof(hash_from_peer), 0);
 
-				if (matchHash(chunk_no, hash_calculated, hash_from_peer) and write_in_file(id, chunk_no, buffer, chunk_size))
+				if (
+					matchHash(chunk_no, hash_calculated, hash_from_peer)
+					and
+					write_in_file(id, chunk_no, buffer, chunk_size))
 				{
-
 					file_meta_vector[id].second[chunk_no] = true;
 					safe_log("completed for chunk - " + to_string(chunk_no));
 					break;
 				}
 			}
+
+			chunk_socket.closeConnection();
 		}
 
-		peer_id = calculate_next_peer(peer_id, fail_safe_total);
+		peer_id = calculate_next_peer(peer_id, total_peers);
 		fail_safe_cnt++;
+		if(fail_safe_cnt%total_peers == 0)
+			this_thread::sleep_for (chrono::seconds(1));
 	}
+	delete[] buffer;
 	chunk_socket.closeConnection();
 }

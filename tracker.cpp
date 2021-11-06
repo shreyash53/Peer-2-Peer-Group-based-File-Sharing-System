@@ -12,7 +12,7 @@
 #define MAX_LEN 4096
 #define SOCKET_SIZE sizeof(struct sockaddr_in)
 
-const int chunk_size = 1024 * 512 -1; //512 KB
+const int chunk_size = 1024 * 512; //512 KB
 
 using namespace std;
 
@@ -545,6 +545,8 @@ void end_connection(int id);
 void handle_client(int client_socket, int id);
 bool userPresent(string &uname);
 
+int tracker_socket_descriptor;
+
 class Socket
 {
 public:
@@ -661,6 +663,12 @@ void get_tracker_ip_and_port(string file_name, string &ip_address, string &port)
 	}
 }
 
+void catch_ctrl_c(int signal)
+{
+	close(tracker_socket_descriptor);
+	exit(signal);
+}
+
 int main(int argc, char **argv)
 {
 	string ip_address, port;
@@ -673,7 +681,8 @@ int main(int argc, char **argv)
 	Socket tracker(ip_address, port);
 
 	tracker.startServerConnection();
-
+	tracker_socket_descriptor = tracker.socketDescriptor;
+	signal(SIGINT, catch_ctrl_c);
 	cout << "Now starting tracker. Accepting peers..." << endl;
 
 	Socket client;
@@ -786,14 +795,20 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 		Peer newPear;
 		if (newPear.deserializeData1(input_in_parts[1]))
 		{
+			string uname = newPear.getName();
+			if(userPresent(uname))
+			{
+				send_message("User already exists", peerThreadObj);
+				return;
+			}
 
 			unique_lock<mutex> lck(all_peers_mtx);
-			all_peers[newPear.getName()] = newPear;
+			all_peers[uname] = newPear;
 
 			lck.unlock();
 
 			// unique_lock<mutex> ulck(peer_thread_mtx);
-			peerThreadObj->peer_name = newPear.getName();
+			peerThreadObj->peer_name = uname;
 			// ulck.unlock();
 			send_message("User successfully created.", peerThreadObj);
 		}

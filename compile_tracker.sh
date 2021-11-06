@@ -1,0 +1,1 @@
+g++ tracker.cpp -std=c++11 -lpthread -o tracker
