@@ -22,7 +22,7 @@ char peer_data_delimiter[] = "||";	// delimiter for Peer
 char glbl_data_delimiter[] = " ";	//global delimiter
 char peer_list_delimiter[] = "&&";	//to differentiate b/w many Peer data
 
-char secret_prefix[] = "$$"; //denotes the string is not to be printed since it contains data
+string secret_prefix = "$$"; //denotes the string is not to be printed since it contains data
 
 char server_prefix[] = "----"; //just for decoration
 
@@ -37,18 +37,25 @@ class AFile
 private:
 	string fileName;
 	long fileSize;
+	string fileHash;
 
 public:
 	AFile() {}
 
-	AFile(string &fileName_, long &fileSize_) : fileName(fileName_), fileSize(fileSize_)
+	// AFile(string &fileName_, long &fileSize_) : fileName(fileName_), fileSize(fileSize_)
+	// {
+	// }
+
+	AFile(string &fileName_, long &fileSize_, string& fileHash_) : fileName(fileName_), 
+		fileSize(fileSize_), fileHash(fileHash_)
 	{
 	}
 
-	void setAFile(string &fileName_, long &fileSize_)
+	void setAFile(string &fileName_, long &fileSize_, string& fileHash_)
 	{
 		fileName = fileName_;
 		fileSize = fileSize_;
+		fileHash = fileHash_;
 	}
 
 	string getFileName()
@@ -56,28 +63,23 @@ public:
 		return fileName;
 	}
 
-	// pairs dumps()
-	// {
-	// 	return make_pair(fileName, fileSize);
-	// }
-
-	// void retrieve(pairs data)
-	// {
-	// 	setAFile(data.first, data.second);
-	// }
+	string getFileHash(){
+		return fileHash;
+	}
 
 	string serializeData()
 	{
-		return fileName + afile_data_delimiter + to_string(fileSize);
+		return fileName + afile_data_delimiter + to_string(fileSize) 
+				+ afile_data_delimiter + fileHash;
 	}
 
 	bool deserialize(string data)
 	{
 		auto parts = stringSplit(data, afile_data_delimiter);
-		if (parts.size() != 2)
+		if (parts.size() != 3)
 			return false;
 		long size = stol(parts[1]);
-		setAFile(parts[0], size);
+		setAFile(parts[0], size, parts[2]);
 		return true;
 	}
 };
@@ -226,7 +228,7 @@ public:
 		cerr << endl;
 		cerr << "now other" << endl;
 		for (auto de : sharedFiles)
-			cerr << de.first << " " << de.second.first.serializeData() << de.second.second << " => ";
+			cerr << de.first << " " << de.second.first.serializeData() << " " << de.second.second << " => ";
 		cerr << endl;
 	}
 
@@ -411,11 +413,11 @@ public:
 		return true;
 	}
 
-	bool addSharedFile(string &filename, Peer &owner)
+	bool addSharedFile(string &filename, string &owner)
 	{
-		if (sharedFiles[filename].count(owner.getName()))
+		if (sharedFiles[filename].count(owner))
 			return false;
-		sharedFiles[filename].insert(owner.getName());
+		sharedFiles[filename].insert(owner);
 		return true;
 	}
 
@@ -759,6 +761,7 @@ void failure_case(const terminal *const peerThreadObject)
 void failure_case(const terminal *const peerThreadObject, vector<string> &input_in_parts)
 {
 	send_message("Operation Unsucessful. Try again with correct input, Also ensure you are logged in.", peerThreadObject);
+	cerr << "failure case :- ";
 	for (auto inp : input_in_parts)
 		cerr << inp << " ";
 	cerr << endl;
@@ -1037,7 +1040,7 @@ void accept_group_request(const terminal *const peerThreadObj, vector<string> &i
 	}
 }
 
-string download_file_helper_serializer(string &groupName, string &filename)
+string download_file_helper_serializer(string &groupName, string& pname, string &filename)
 {
 	string firstPart = groupName;
 	string secondPart = "";
@@ -1053,6 +1056,7 @@ string download_file_helper_serializer(string &groupName, string &filename)
 	lock_guard<mutex> grd(all_peers_mtx);
 	for (auto peer : plist)
 	{
+		if(peer != pname){
 		cerr << "peer - " << peer << endl;
 		if (i == 0)
 			secondPart = all_peers[peer].getFileObject(groupName, filename).serializeData();
@@ -1062,8 +1066,11 @@ string download_file_helper_serializer(string &groupName, string &filename)
 			if (i + 1 < n)
 				thirdPart += peer_list_delimiter;
 		}
+		}
 		i++;
 	}
+	if(thirdPart == "")
+		return "";
 	return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
 }
 
@@ -1082,16 +1089,15 @@ void download_file(const terminal *const peerThreadObj, vector<string> &input_in
 			{
 				grd.unlock();
 				cerr << "getting file for download:" << endl;
-				msg = download_file_helper_serializer(gname, file_name);
-				cerr << msg << endl;
+				msg = download_file_helper_serializer(gname, pname, file_name);
 				if (msg.length())
 				{
-					msg = glbl_data_delimiter + msg;
-					msg = secret_prefix + msg;
+				cerr << msg << endl;
+					msg = secret_prefix + glbl_data_delimiter + msg;
 				}
 				else
 				{
-					msg = "error while finding the file.";
+					msg = "error while finding the file or no peers to download from.";
 				}
 			}
 			else
@@ -1167,7 +1173,7 @@ void upload_file(const terminal *const peerThreadObj, vector<string> &input_in_p
 				ulck.unlock();
 				lock_guard<mutex> grd(all_groups_mtx);
 				string filename = afile.getFileName();
-				if (all_groups[gname].addSharedFile(filename, all_peers[pname]))
+				if (all_groups[gname].addSharedFile(filename, pname))
 				{
 					msg = "## Successfully Uploaded.";
 					responseFlag = true;
@@ -1239,7 +1245,7 @@ void debug();
 
 void handle_client(int client_socket, int id)
 {
-	char name[MAX_LEN], str[MAX_LEN];
+	char str[MAX_LEN];
 
 	terminal *peerThreadObj;
 
@@ -1251,12 +1257,13 @@ void handle_client(int client_socket, int id)
 	while (true)
 	{
 		// cout << "now waiting" << endl;
+		memset(str, 0, sizeof(str));
 		int bytes_received = recv(client_socket, str, sizeof(str), 0);
-		cerr << server_prefix << glbl_data_delimiter << str << endl;
-		if (bytes_received < 0)
+		if (bytes_received <= 0)
 		{
 			continue;
 		}
+		cerr << server_prefix << glbl_data_delimiter << str << endl;
 		unique_lock<mutex> grd(peer_thread_mtx);
 		for (int i = 0; i < all_peers_terminals.size(); i++)
 		{
@@ -1278,6 +1285,7 @@ void handle_client(int client_socket, int id)
 
 		cerr << id << " : " << peerThreadObj->peer_name << " -> ";
 		inputCommand = input_in_parts[0];
+		cerr << server_prefix << glbl_data_delimiter << inputCommand << endl;
 
 		if (inputCommand == secret_prefix)
 		{
@@ -1286,6 +1294,25 @@ void handle_client(int client_socket, int id)
 				cout << server_prefix << glbl_data_delimiter << peerThreadObj->peer_name << " has ended connection" << endl;
 				end_connection(id);
 				return;
+			}
+			if(input_in_parts[1] == "download_complete"){
+				string gname = input_in_parts[2];
+				string fname = input_in_parts[3];
+				string pname = peerThreadObj->peer_name;
+				cerr << "download complete of " << pname << " in group " << gname << " for file " << fname << endl;
+				unique_lock<mutex> grd(all_groups_mtx);
+				string some_peer_name;
+				for(auto& peer_name : all_groups[gname].getSetOfPeerNamesByFile(fname))
+				{
+					some_peer_name = peer_name;
+					break;
+				}
+				if(!all_groups[gname].addSharedFile(fname, pname))
+					cerr << "file not added as shared" << endl;
+				grd.unlock();
+				lock_guard<mutex> lck(all_peers_mtx);
+				auto file_obj = all_peers[some_peer_name].getFileObject(gname, fname);
+				all_peers[pname].addFile(file_obj, gname);
 			}
 		}
 		else
