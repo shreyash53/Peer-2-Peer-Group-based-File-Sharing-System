@@ -46,12 +46,12 @@ public:
 	// {
 	// }
 
-	AFile(string &fileName_, long &fileSize_, string& fileHash_) : fileName(fileName_), 
-		fileSize(fileSize_), fileHash(fileHash_)
+	AFile(string &fileName_, long &fileSize_, string &fileHash_) : fileName(fileName_),
+																   fileSize(fileSize_), fileHash(fileHash_)
 	{
 	}
 
-	void setAFile(string &fileName_, long &fileSize_, string& fileHash_)
+	void setAFile(string &fileName_, long &fileSize_, string &fileHash_)
 	{
 		fileName = fileName_;
 		fileSize = fileSize_;
@@ -63,14 +63,14 @@ public:
 		return fileName;
 	}
 
-	string getFileHash(){
+	string getFileHash()
+	{
 		return fileHash;
 	}
 
 	string serializeData()
 	{
-		return fileName + afile_data_delimiter + to_string(fileSize) 
-				+ afile_data_delimiter + fileHash;
+		return fileName + afile_data_delimiter + to_string(fileSize) + afile_data_delimiter + fileHash;
 	}
 
 	bool deserialize(string data)
@@ -97,7 +97,6 @@ private:
 	bool isOnline;
 
 public:
-
 	void setIsOnline(bool status)
 	{
 		isOnline = status;
@@ -739,7 +738,8 @@ void end_connection(int id)
 	{
 		if (all_peers_terminals[i].id == id)
 		{
-			if(userPresent(all_peers_terminals[i].peer_name)){
+			if (userPresent(all_peers_terminals[i].peer_name))
+			{
 				string uname = all_peers_terminals[i].peer_name;
 				lock_guard<mutex> lck(all_peers_mtx);
 				all_peers[uname].setIsOnline(false);
@@ -799,7 +799,7 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 		if (newPear.deserializeData1(input_in_parts[1]))
 		{
 			string uname = newPear.getName();
-			if(userPresent(uname))
+			if (userPresent(uname))
 			{
 				send_message("User already exists", peerThreadObj);
 				return;
@@ -826,17 +826,18 @@ void create_user(terminal *const peerThreadObj, vector<string> &input_in_parts)
 void login(terminal *const peerThreadObj, vector<string> &input_in_parts, bool &is_login_success)
 {
 
-	if (input_in_parts.size() == 1){
+	if (input_in_parts.size() == 1)
+	{
 		failure_case(peerThreadObj, input_in_parts);
 		return;
 	}
-	
+
 	Peer peer_;
-	if(!peer_.deserializeData3(input_in_parts[1]))
-		{
-			send_message("Incorrect Input - try again", peerThreadObj);
-			return;
-		}
+	if (!peer_.deserializeData3(input_in_parts[1]))
+	{
+		send_message("Incorrect Input - try again", peerThreadObj);
+		return;
+	}
 
 	string pname = peer_.getName();
 	if (!userPresent(pname))
@@ -1040,7 +1041,7 @@ void accept_group_request(const terminal *const peerThreadObj, vector<string> &i
 	}
 }
 
-string download_file_helper_serializer(string &groupName, string& pname, string &filename)
+string download_file_helper_serializer(string &groupName, string &pname, string &filename)
 {
 	string firstPart = groupName;
 	string secondPart = "";
@@ -1056,20 +1057,21 @@ string download_file_helper_serializer(string &groupName, string& pname, string 
 	lock_guard<mutex> grd(all_peers_mtx);
 	for (auto peer : plist)
 	{
-		if(peer != pname){
-		cerr << "peer - " << peer << endl;
 		if (i == 0)
 			secondPart = all_peers[peer].getFileObject(groupName, filename).serializeData();
-		if (all_peers[peer].getIsOnline())
+		if (peer != pname)
 		{
-			thirdPart += all_peers[peer].serializeData2();
-			if (i + 1 < n)
-				thirdPart += peer_list_delimiter;
-		}
+			cerr << "peer - " << peer << endl;
+			if (all_peers[peer].getIsOnline())
+			{
+				thirdPart += all_peers[peer].serializeData2();
+				if (i + 1 < n)
+					thirdPart += peer_list_delimiter;
+			}
 		}
 		i++;
 	}
-	if(thirdPart == "")
+	if (thirdPart == "")
 		return "";
 	return firstPart + glbl_data_delimiter + secondPart + glbl_data_delimiter + thirdPart;
 }
@@ -1092,7 +1094,7 @@ void download_file(const terminal *const peerThreadObj, vector<string> &input_in
 				msg = download_file_helper_serializer(gname, pname, file_name);
 				if (msg.length())
 				{
-				cerr << msg << endl;
+					cerr << msg << endl;
 					msg = secret_prefix + glbl_data_delimiter + msg;
 				}
 				else
@@ -1295,19 +1297,20 @@ void handle_client(int client_socket, int id)
 				end_connection(id);
 				return;
 			}
-			if(input_in_parts[1] == "download_complete"){
+			if (input_in_parts[1] == "download_complete")
+			{
 				string gname = input_in_parts[2];
 				string fname = input_in_parts[3];
 				string pname = peerThreadObj->peer_name;
 				cerr << "download complete of " << pname << " in group " << gname << " for file " << fname << endl;
 				unique_lock<mutex> grd(all_groups_mtx);
 				string some_peer_name;
-				for(auto& peer_name : all_groups[gname].getSetOfPeerNamesByFile(fname))
+				for (auto &peer_name : all_groups[gname].getSetOfPeerNamesByFile(fname))
 				{
 					some_peer_name = peer_name;
 					break;
 				}
-				if(!all_groups[gname].addSharedFile(fname, pname))
+				if (!all_groups[gname].addSharedFile(fname, pname))
 					cerr << "file not added as shared" << endl;
 				grd.unlock();
 				lock_guard<mutex> lck(all_peers_mtx);
