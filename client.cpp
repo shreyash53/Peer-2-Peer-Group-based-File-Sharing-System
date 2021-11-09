@@ -111,6 +111,24 @@ private:
 	unordered_map<string, pair<AFile, int>> sharedFiles;			 //key = filename and value = pair of file object and no. of groups the file is shared
 	unordered_map<string, unordered_set<string>> sharedFilesInGroup; //key = group name and value = set of filenames
 
+	struct fileDownloadMeta
+	{
+		string status;
+		string groupName;
+		string fileName;
+
+		fileDownloadMeta(string& status_, string& groupName_, string& fileName_):
+		status(status_), groupName(groupName_), fileName(fileName_)
+		{}
+
+		string serialize()
+		{
+			return "[" + status + "] [" + groupName + "] " + fileName;
+		}
+	};
+
+	vector<fileDownloadMeta> all_downloads;
+
 	bool isOnline;
 
 	void setIsOnline(bool status)
@@ -348,6 +366,30 @@ public:
 			res += "\n";
 		}
 		return res;
+	}
+
+	void addDownload(string group_name, string filename)
+	{
+		string status = "D";
+		fileDownloadMeta down_meta(status, group_name, filename);
+		all_downloads.push_back(down_meta);
+	}
+
+	void setDownloadStatus(string status, string group_name, string filename)
+	{
+		for (int i = (int)all_downloads.size() - 1; i >= 0; i--)
+		{
+			if (all_downloads[i].fileName == filename and all_downloads[i].groupName == group_name)
+			{
+				all_downloads[i].status = status;
+				break;
+			}
+		}
+	}
+
+	vector<fileDownloadMeta> &getAllDownloads()
+	{
+		return all_downloads;
 	}
 };
 
@@ -760,6 +802,9 @@ void send_to_tracker(int peer_to_tracker_socket_descriptor)
 
 			else if (command == "show_downloads")
 			{
+				message = " ";
+				for (auto &download_meta : peer.getAllDownloads())
+					cout << download_meta.serialize() << endl;
 			}
 
 			else if (command == "stop_share")
@@ -875,10 +920,14 @@ void action_event(vector<string> &parts)
 		}
 	}
 
-	// cerr << "below queue " << endl;
+	cerr << "below queue " << endl;
 
 	if (input_parts.size() == 0)
 		return;
+
+	for(auto& in_: input_parts)
+		cerr << in_ << ", ";
+		cerr << endl;
 
 	// cerr << "now action start " << endl;
 
@@ -1216,6 +1265,7 @@ void download_manager(int peer_to_tracker_socket_descriptor, vector<string> &inp
 	}
 	file_meta_vector[seed].group_name = input_parts[1];
 	file_meta_vector[seed].afile = afile;
+	peer.addDownload(input_parts[1], afile.getFileName());
 	thread t(download_handler, seed, peer_to_tracker_socket_descriptor);
 	t.detach();
 	// t.join();
@@ -1275,6 +1325,7 @@ void download_handler(int id, int peer_to_tracker_socket_descriptor)
 	// uck.unlock();
 
 	cerr << "Now all threads are over " << endl;
+	string status;
 
 	bool flag = false;
 	vector<int> chunks_failed;
@@ -1299,6 +1350,7 @@ void download_handler(int id, int peer_to_tracker_socket_descriptor)
 		for (auto i : chunks_failed)
 			cerr << i << " ";
 		cerr << endl;
+		status = 'F';
 
 		file_remove(filename);
 	}
@@ -1316,14 +1368,17 @@ void download_handler(int id, int peer_to_tracker_socket_descriptor)
 			string message = secret_prefix + glbl_data_delimiter + "download_complete" + glbl_data_delimiter + file_meta_vector[id].group_name + glbl_data_delimiter + filename;
 			peer.addFile(file_meta_vector[id].afile, file_meta_vector[id].group_name);
 			send_away(message, peer_to_tracker_socket_descriptor);
+			status = 'C';
 		}
 		else
 		{
 			cerr << "File hash found different. Deleting file " << endl;
 			clear_print("Download Failed");
 			file_remove(filename);
+			status = 'F';
 		}
 	}
+	peer.setDownloadStatus(status, file_meta_vector[id].group_name, filename);
 
 	all_peers_threads.erase(id);
 	all_peers_ptrs.erase(id);
