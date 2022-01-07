@@ -9,12 +9,15 @@
 #include <thread>
 #include <signal.h>
 #include <mutex>
+#include <chrono>
+#include <openssl/sha.h>
 
 #define MAX_LEN 4096
+#define SOCKET_SIZE sizeof(struct sockaddr_in)
 
 char back_space = 8;
 
-int chunk_size = 1024 * 512; //512 KB
+const int CHUNK_SIZE = 1024 * 512; //512 KB
 
 using namespace std;
 
@@ -25,11 +28,18 @@ char glbl_data_delimiter[] = " ";	//global delimiter
 
 char peer_list_delimiter[] = "&&"; //to differentiate b/w many Peer data
 
-char secret_prefix[] = "$$"; //denotes the string is not to be printed since it contains data
+string secret_prefix = "$$"; //denotes the string is not to be printed since it contains data
 
 vector<string> stringSplit(string input, char delim[]);
-void send_message(int tracker_socket);
-void recv_message(int tracker_socket);
+void send_to_tracker(int peer_to_tracker_socket_descriptor);
+void recv_from_tracker(int peer_to_tracker_socket_descriptor);
+void action_event(vector<string> &);
+void download_manager(int, vector<string> &);
+string get_chunk_hash(char *buffer, long size);
+string pass_file_to_hash_function(string &filename, long filesize);
+void file_remove(string &filename);
+bool matchHash(int id, string hash_calculated, string hash_from_peer);
+void eraseText(int cnt);
 
 queue<vector<string>> commandsExecuted; //to ensure the result of an event oriented command is reflected
 mutex cmmds_exc_mtx;
@@ -39,18 +49,25 @@ class AFile
 private:
 	string fileName;
 	long fileSize;
+	string fileHash;
 
 public:
 	AFile() {}
 
-	AFile(string &fileName_, long &fileSize_) : fileName(fileName_), fileSize(fileSize_)
+	// AFile(string &fileName_, long &fileSize_) : fileName(fileName_), fileSize(fileSize_)
+	// {
+	// }
+
+	AFile(string &fileName_, long &fileSize_, string &fileHash_) : fileName(fileName_),
+																   fileSize(fileSize_), fileHash(fileHash_)
 	{
 	}
 
-	void setAFile(string &fileName_, long &fileSize_)
+	void setAFile(string &fileName_, long &fileSize_, string &fileHash_)
 	{
 		fileName = fileName_;
 		fileSize = fileSize_;
+		fileHash = fileHash_;
 	}
 
 	string getFileName()
@@ -58,28 +75,28 @@ public:
 		return fileName;
 	}
 
-	// pairs dumps()
-	// {
-	// 	return make_pair(fileName, fileSize);
-	// }
+	string getFileHash()
+	{
+		return fileHash;
+	}
 
-	// void retrieve(pairs data)
-	// {
-	// 	setAFile(data.first, data.second);
-	// }
+	long getFileSize()
+	{
+		return fileSize;
+	}
 
 	string serializeData()
 	{
-		return fileName + afile_data_delimiter + to_string(fileSize);
+		return fileName + afile_data_delimiter + to_string(fileSize) + afile_data_delimiter + fileHash;
 	}
 
 	bool deserialize(string data)
 	{
 		auto parts = stringSplit(data, afile_data_delimiter);
-		if (parts.size() != 2)
+		if (parts.size() != 3)
 			return false;
 		long size = stol(parts[1]);
-		setAFile(parts[0], size);
+		setAFile(parts[0], size, parts[2]);
 		return true;
 	}
 };
@@ -93,6 +110,24 @@ private:
 	string port_no;
 	unordered_map<string, pair<AFile, int>> sharedFiles;			 //key = filename and value = pair of file object and no. of groups the file is shared
 	unordered_map<string, unordered_set<string>> sharedFilesInGroup; //key = group name and value = set of filenames
+
+	struct fileDownloadMeta
+	{
+		string status;
+		string groupName;
+		string fileName;
+
+		fileDownloadMeta(string &status_, string &groupName_, string &fileName_) : status(status_), groupName(groupName_), fileName(fileName_)
+		{
+		}
+
+		string serialize()
+		{
+			return "[" + status + "] [" + groupName + "] " + fileName;
+		}
+	};
+
+	vector<fileDownloadMeta> all_downloads;
 
 	bool isOnline;
 
@@ -137,15 +172,25 @@ public:
 		}
 	}
 
+	bool hasFile(string &filename)
+	{
+		return sharedFiles.count(filename);
+	}
+
 	unordered_set<string> getFileListByGroup(string &groupName)
 	{
 		return sharedFilesInGroup[groupName];
 	}
 
-	// void resetAllSharedFiles()
-	// {
-	// 	sharedFilesInGroup.clear();
-	// }
+	string getIPAdress()
+	{
+		return ipAddress;
+	}
+
+	string getPortNo()
+	{
+		return port_no;
+	}
 
 	bool isPresentInGroup(string &gname)
 	{
@@ -196,12 +241,9 @@ public:
 		return name;
 	}
 
-	AFile getFileObject(string &groupname, string &filename)
+	AFile getFileObject(string &filename)
 	{
-
-		if (sharedFilesInGroup[groupname].count(filename))
-			return sharedFiles[filename].first;
-		return AFile();
+		return sharedFiles[filename].first;
 	}
 
 	void addFile(AFile &afile, string &group_name)
@@ -218,7 +260,7 @@ public:
 	bool loginCondition(string &input_string)
 	{
 		auto parts = stringSplit(input_string, peer_data_delimiter);
-		cerr << "logincondition: " << parts.size() << " " << this->isOnline << endl;
+		//cerr << "logincondition: " << parts.size() << " " << this->isOnline << endl;
 		if (parts.size() == 2 and name == parts[0] and pword == parts[1] and !isOnline)
 		{
 			setIsOnline(true);
@@ -325,76 +367,114 @@ public:
 		}
 		return res;
 	}
+
+	void addDownload(string group_name, string filename)
+	{
+		string status = "D";
+		fileDownloadMeta down_meta(status, group_name, filename);
+		all_downloads.push_back(down_meta);
+	}
+
+	void setDownloadStatus(string status, string group_name, string filename)
+	{
+		for (int i = (int)all_downloads.size() - 1; i >= 0; i--)
+		{
+			if (all_downloads[i].fileName == filename and all_downloads[i].groupName == group_name)
+			{
+				all_downloads[i].status = status;
+				break;
+			}
+		}
+	}
+
+	vector<fileDownloadMeta> &getAllDownloads()
+	{
+		return all_downloads;
+	}
 };
 
 class Socket
 {
-private:
-	int server_socket;
-	struct sockaddr_in server;
-
 public:
-	Socket(string &ip_address, string &port)
-	{
+	int socketDescriptor;
+	struct sockaddr_in socketAddr;
 
-		if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+	Socket()
+	{
+		if ((socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
 		{
-			perror("socket: ");
+			perror("socket error: ");
 			exit(-1);
 		}
-		server.sin_family = AF_INET;
-		server.sin_port = htons(10000);
-		server.sin_addr.s_addr = INADDR_ANY;
-		bzero(&server.sin_zero, 0);
+		socketAddr.sin_family = AF_INET;
+		socketAddr.sin_addr.s_addr = INADDR_ANY;
+		bzero(&socketAddr.sin_zero, 0);
 	}
 
-	~Socket()
+	Socket(string &ip_address, string &port) : Socket()
 	{
-		close(server_socket);
+		socketAddr.sin_port = htons(stoi(port));
+		socketAddr.sin_addr.s_addr = inet_addr(ip_address.c_str());
 	}
+
+	// ~Socket()
+	// {
+
+	// }
 
 	void startServerConnection()
 	{
-		if ((bind(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
-		{
-			perror("bind error: ");
-		}
-		if ((listen(server_socket, 8)) == -1)
+		bindConnection();
+		if ((listen(socketDescriptor, 8)) == -1)
 		{
 			perror("listen error: ");
+			exit(-1);
 		}
 	}
 
-	int acceptConnectionAtServer()
+	void acceptConnectionAtServer(Socket *clientSocket)
 	{
-		int client_socket;
-		struct sockaddr_in client;
-		unsigned int len = sizeof(sockaddr_in);
-		if ((client_socket = accept(server_socket, (struct sockaddr *)&client, &len)) == -1)
+		unsigned long adr_size = SOCKET_SIZE;
+		if ((clientSocket->socketDescriptor = accept(socketDescriptor, (struct sockaddr *)&clientSocket->socketAddr, (socklen_t *)&adr_size)) == -1)
 		{
 			perror("accept error: ");
-			// exit(-1);
 		}
 		else
-			cout << "*|*|* "
-				 << "  " << client.sin_port << endl;
-		return client_socket;
+		{
+			//cerr << "*|*|* "
+			//  << "  " << clientSocket->socketAddr.sin_port
+			//  << endl;
+			char ip[INET_ADDRSTRLEN];
+			inet_ntop(AF_INET, &(clientSocket->socketAddr.sin_addr), ip, INET_ADDRSTRLEN);
+
+			// "ntohs(peer_addr.sin_port)" function is
+			// for finding port number of client
+			//cerr << "connection established with IP : " << ip << "and PORT : " << ntohs(clientSocket->socketAddr.sin_port) << endl;
+		}
 	}
 
-	int connectAtClient()
+	void bindConnection()
 	{
+		if ((bind(socketDescriptor, (struct sockaddr *)&socketAddr, SOCKET_SIZE)) == -1)
+		{
+			perror("bind error: ");
+			exit(-1);
+		}
+	}
 
-		if ((connect(server_socket, (struct sockaddr *)&server, sizeof(struct sockaddr_in))) == -1)
+	int connectAtClient(int clientSocketDescriptor)
+	{
+		if ((connect(clientSocketDescriptor, (struct sockaddr *)&socketAddr, SOCKET_SIZE)) == -1)
 		{
 			perror("connect: ");
 			return -1;
 		}
-		return server_socket;
+		return 0;
 	}
 
 	void closeConnection()
 	{
-		// close(server_socket);
+		close(socketDescriptor);
 	}
 };
 
@@ -432,23 +512,35 @@ void get_tracker_ip_and_port(string file_name, string &ip_address, string &port)
 	}
 }
 
+void handle_peer(int peer_socket);
+void peer_listener_helper();
+
 Peer peer;
 
 bool exit_flag = false;
 bool tracker_login_status = false;
-thread t_send, t_recv;
-int tracker_socket;
+thread tracker_send, tracker_recv, peer_listener;
+int peer_to_tracker_socket_descriptor;
 string peer_ip_address, peer_port;
+
+void clear_print(string msg)
+{
+	// cout << "\033[K";
+	eraseText(3);
+	cout << msg << endl;
+	cout << "-> ";
+}
 
 void catch_ctrl_c(int signal)
 {
 	char str[MAX_LEN] = "$$ exit";
 	// char str[MAX_LEN]=secret_prefix + glbl_data_delimiter + "exit";
-	send(tracker_socket, str, sizeof(str), 0);
+	send(peer_to_tracker_socket_descriptor, str, sizeof(str), 0);
 	exit_flag = true;
-	t_send.detach();
-	t_recv.detach();
-	close(tracker_socket);
+	tracker_send.detach();
+	tracker_recv.detach();
+	peer_listener.detach();
+	close(peer_to_tracker_socket_descriptor);
 	exit(signal);
 }
 
@@ -466,7 +558,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	auto ip_parts = stringSplit(argv[1], afile_data_delimiter);
+	auto ip_parts = stringSplit(argv[1], ip_port_delimiter);
 	if (ip_parts.size() != 2)
 	{
 		perror("invalid runtime args");
@@ -478,34 +570,57 @@ int main(int argc, char **argv)
 
 	Socket tracker(tracker_ip_address, tracker_port);
 
-	tracker_socket = tracker.connectAtClient();
+	Socket client;
+
+	if (tracker.connectAtClient(client.socketDescriptor) != 0)
+	{
+		cout << "error while connecting to tracker" << endl;
+		return -1;
+	}
+	peer_to_tracker_socket_descriptor = client.socketDescriptor;
 
 	signal(SIGINT, catch_ctrl_c);
 
-	thread t1(send_message, tracker_socket);
-	thread t2(recv_message, tracker_socket);
+	thread t1(send_to_tracker, peer_to_tracker_socket_descriptor);
+	thread t2(recv_from_tracker, peer_to_tracker_socket_descriptor);
+	thread t3(peer_listener_helper);
 
-	t_send = move(t1);
-	t_recv = move(t2);
+	tracker_send = move(t1);
+	tracker_recv = move(t2);
+	peer_listener = move(t3);
 
-	if (t_send.joinable())
-		t_send.join();
-	if (t_recv.joinable())
-		t_recv.join();
+	if (tracker_send.joinable())
+		tracker_send.join();
+	if (tracker_recv.joinable())
+		tracker_recv.join();
+	if (peer_listener.joinable())
+		peer_listener.join();
+
+	client.closeConnection();
 
 	return 0;
 }
 
 long findSizeOfFile(string file_name)
 {
-	FILE *fp = fopen(file_name.c_str(), "r");
-	if (fp == NULL)
-	{
+	// FILE *fp = fopen(file_name.c_str(), "r");
+	// if (fp == NULL)
+	// {
+	// 	return -1;
+	// }
+	// fseek(fp, 0L, SEEK_END);
+	// long int res = ftell(fp);
+	// fclose(fp);
+	ifstream ff(file_name, ios::binary | ios::in);
+	if (!ff.is_open())
 		return -1;
-	}
-	fseek(fp, 0L, SEEK_END);
-	long int res = ftell(fp);
-	fclose(fp);
+	ff.seekg(0, ios::end);
+	long res = ff.tellg();
+	// char *buffer = new char[res];
+	// ff.seekg(0, ios::beg);
+	// ff.read(buffer, res);
+	// //cerr << "The hash for " << file_name << " : " << get_chunk_hash(buffer, res) << endl;
+	ff.close();
 	return res;
 }
 
@@ -522,15 +637,23 @@ void input_error()
 	cout << "Invalid Input. Or Ensure you are logged In to use other commands." << endl;
 }
 
-void send_message_helper(string &message, int tracker_socket)
+mutex tracker_message_send;
+void send_away(char msg[], int msg_size, int socket_d)
+{
+	// lock_guard<mutex> grd(tracker_message_send);
+	send(socket_d, msg, msg_size, 0);
+	//cerr << "msg sent: " << msg << endl;
+}
+void send_away(string &message, int socket_d)
 {
 	char temp[MAX_LEN];
 	strcpy(temp, message.c_str());
-	send(tracker_socket, temp, sizeof(temp), 0);
-	cerr << "msg sent: " << temp << endl;
+	send(socket_d, temp, sizeof(temp), 0);
+	//cerr << "msg sent: " << temp << endl;
+	// send_away(temp, min(message.length(), sizeof(temp)), socket_d);
 }
 
-void send_message(int tracker_socket)
+void send_to_tracker(int peer_to_tracker_socket_descriptor)
 {
 	string command, message;
 	while (1)
@@ -542,7 +665,7 @@ void send_message(int tracker_socket)
 		char str[MAX_LEN];
 		cin.getline(str, MAX_LEN);
 		auto input_parts = stringSplit(str, glbl_data_delimiter);
-		cerr << "tracker_login_status: " << tracker_login_status << endl;
+		//cerr << "tracker_login_status: " << tracker_login_status << endl;
 		command = input_parts[0];
 
 		if (command == "login")
@@ -564,13 +687,13 @@ void send_message(int tracker_socket)
 				Peer t(input_parts[1], input_parts[2], peer_ip_address, peer_port);
 				peer = t;
 				message = command + " " + peer.serializeData1();
-				cerr << "inside create " << message << endl;
+				//cerr << "inside create " << message << endl;
 			}
 		}
 		else if (command == "pass")
 		{
 			//for debugging
-			cerr << "now passing" << endl;
+			//cerr << "now passing" << endl;
 			continue;
 		}
 
@@ -581,7 +704,7 @@ void send_message(int tracker_socket)
 				if (input_parts.size() == 2)
 				{
 					message = str;
-					cerr << "inside join group - " << str << endl;
+					//cerr << "inside join group - " << str << endl;
 				}
 			}
 
@@ -591,7 +714,7 @@ void send_message(int tracker_socket)
 				{
 					commandsExecuted.push(input_parts);
 					message = str;
-					cerr << "inside create group - " << str << endl;
+					//cerr << "inside create group - " << str << endl;
 				}
 			}
 
@@ -601,16 +724,16 @@ void send_message(int tracker_socket)
 				{
 					commandsExecuted.push(input_parts);
 					message = str;
-					cerr << "inside leave group - " << str << endl;
+					//cerr << "inside leave group - " << str << endl;
 				}
 			}
 
-			else if (command == "requests")
+			else if (command == "requests" and input_parts[1] == "list_requests")
 			{
 				if (input_parts.size() == 3)
 				{
 					message = str;
-					cerr << "inide requests list requests - " << str << endl;
+					//cerr << "inide requests list requests - " << str << endl;
 				}
 			}
 
@@ -619,14 +742,14 @@ void send_message(int tracker_socket)
 				if (input_parts.size() == 3)
 				{
 					message = str;
-					cerr << "inside accept request - " << str << endl;
+					//cerr << "inside accept request - " << str << endl;
 				}
 			}
 
 			else if (command == "list_groups")
 			{
 				message = command;
-				cerr << "inside list_groups" << endl;
+				//cerr << "inside list_groups" << endl;
 			}
 
 			else if (command == "list_files")
@@ -636,7 +759,7 @@ void send_message(int tracker_socket)
 					// if(!peer.isPresentInGroup(input_parts[1]))
 					commandsExecuted.push(input_parts);
 					message = str;
-					cerr << "inside list files - " << str << endl;
+					//cerr << "inside list files - " << str << endl;
 				}
 			}
 
@@ -647,13 +770,15 @@ void send_message(int tracker_socket)
 					string filename = input_parts[1];
 					string gname = input_parts[2];
 					long filesize = findSizeOfFile(filename);
+					string filehash = pass_file_to_hash_function(filename, filesize);
 					if (filesize != -1)
 					{
-						input_parts.push_back(to_string(filesize));
+						AFile afile(filename, filesize, filehash);
+						string file_serialized = afile.serializeData();
+						input_parts.push_back(file_serialized);
 						commandsExecuted.push(input_parts);
-						AFile afile(filename, filesize);
-						message = command + " " + gname + " " + afile.serializeData();
-						cerr << "inside upload file - " << message << endl;
+						message = command + " " + gname + " " + file_serialized;
+						//cerr << "inside upload file - " << message << endl;
 					}
 				}
 			}
@@ -664,7 +789,7 @@ void send_message(int tracker_socket)
 				{
 					for (int i = 0; i < 3; i++)
 						message += input_parts[i] + glbl_data_delimiter;
-					cerr << "inside download - " << str << endl;
+					//cerr << "inside download - " << str << endl;
 				}
 			}
 
@@ -672,11 +797,14 @@ void send_message(int tracker_socket)
 			{
 				commandsExecuted.push(input_parts);
 				message = command;
-				cerr << "inside logout" << endl;
+				//cerr << "inside logout" << endl;
 			}
 
 			else if (command == "show_downloads")
 			{
+				message = " ";
+				for (auto &download_meta : peer.getAllDownloads())
+					cout << download_meta.serialize() << endl;
 			}
 
 			else if (command == "stop_share")
@@ -686,7 +814,7 @@ void send_message(int tracker_socket)
 					commandsExecuted.push(input_parts);
 
 					message = str;
-					cerr << "inside stop share " << str << endl;
+					//cerr << "inside stop share " << str << endl;
 				}
 			}
 		}
@@ -697,38 +825,58 @@ void send_message(int tracker_socket)
 		}
 		else
 		{
-			send_message_helper(message, tracker_socket);
+			send_away(message, peer_to_tracker_socket_descriptor);
 		}
 
 		// if(strcmp(str,"#exit")==0)
 		// {
 		// 	exit_flag=true;
-		// 	t_recv.detach();
-		// 	close(tracker_socket);
+		// 	tracker_recv.detach();
+		// 	close(peer_to_tracker_socket_descriptor);
 		// 	return;
 		// }
 	}
 }
 
-void action_event(vector<string> &);
+string pass_file_to_hash_function(string &filename, long filesize)
+{
+	ifstream file_(filename, ios::binary | ios::in);
+	if (!file_.is_open())
+		return "";
+	file_.seekg(0, ios::beg);
+	char *buffer = new char[filesize];
+	file_.read(buffer, filesize);
+	string hash = get_chunk_hash(buffer, filesize);
+	delete[] buffer;
+	return hash;
+}
+
 // Receive message
-void recv_message(int tracker_socket)
+void recv_from_tracker(int peer_to_tracker_socket_descriptor)
 {
 	while (1)
 	{
 		if (exit_flag)
 			return;
 		char name[MAX_LEN], msg[MAX_LEN];
-		int bytes_received = recv(tracker_socket, msg, sizeof(msg), 0);
+		int bytes_received = recv(peer_to_tracker_socket_descriptor, msg, sizeof(msg), 0);
 		if (bytes_received <= 0)
 			continue;
 		if (msg[0] == '$' and msg[1] == '$')
 		{
-			cerr << "download -->> " << msg << endl;
+			//cerr << "download -->> " << msg << endl;
 			auto data = stringSplit(msg, glbl_data_delimiter);
 			if (data.size() == 4)
 			{
-				cerr << "woking it seems" << endl;
+				cout << endl
+					 << "Download now starting -->> " << endl;
+				//cerr << "woking it seems" << endl;
+				download_manager(peer_to_tracker_socket_descriptor, data);
+			}
+			else
+			{
+				cout << "download failed" << endl;
+				//cerr << "download failed due to incorrect string input from tracker" << endl;
 			}
 		}
 		else
@@ -737,7 +885,7 @@ void recv_message(int tracker_socket)
 			{
 				// int loginStatus;
 				char action[MAX_LEN];
-				recv(tracker_socket, action, sizeof(action), 0);
+				recv(peer_to_tracker_socket_descriptor, action, sizeof(action), 0);
 				// if (loginStatus)
 				// 	tracker_login_status = (bool)loginStatus;
 				auto parts = stringSplit(action, glbl_data_delimiter);
@@ -745,9 +893,7 @@ void recv_message(int tracker_socket)
 			}
 
 			// recv(client_socket,msg,sizeof(msg),0);
-			eraseText(3);
-			cout << msg << endl;
-			cout << "-> ";
+			clear_print(msg);
 		}
 		fflush(stdout);
 	}
@@ -759,8 +905,8 @@ void action_event(vector<string> &parts)
 {
 	string inputCommand = parts[0];
 	int answer = stoi(parts[1]);
-	cerr << "inside action event" << endl;
-	cerr << "input command: " << inputCommand << " " << answer << endl;
+	//cerr << "inside action event" << endl;
+	//cerr << "input command: " << inputCommand << " " << answer << endl;
 	vector<string> input_parts;
 	unique_lock<mutex> ulck(cmmds_exc_mtx);
 	while (!commandsExecuted.empty())
@@ -774,68 +920,628 @@ void action_event(vector<string> &parts)
 		}
 	}
 
-	cerr << "below queue " << endl;
+	//cerr << "below queue " << endl;
 
 	if (input_parts.size() == 0)
 		return;
 
-	cerr << "now action start " << endl;
+	for (auto &in_ : input_parts)
+		//cerr << in_ << ", ";
+		//cerr << endl;
 
-	if (inputCommand == "login")
-	{
-		tracker_login_status = answer;
-	}
+		// //cerr << "now action start " << endl;
 
-	// if (inputCommand == "join_group")
-	// {
-	// 	join_group(peerThreadObj, input_in_parts);
-	// }
+		if (inputCommand == "login")
+		{
+			tracker_login_status = answer;
+		}
 
-	else if (inputCommand == "create_group" and answer)
-	{
+		// if (inputCommand == "join_group")
+		// {
+		// 	join_group(peerThreadObj, input_in_parts);
+		// }
 
-		peer.addGroup(input_parts[1]);
-	}
+		else if (inputCommand == "create_group" and answer)
+		{
 
-	else if (inputCommand == "leave_group" and answer)
-	{
-		peer.deleteGroup(input_parts[1]);
-	}
-
-	// else if (inputCommand == "download_file" and answer)
-	// {
-	// 	download_file(peerThreadObj, input_in_parts);
-	// }
-
-	else if (inputCommand == "list_files" and answer)
-	{
-		if (!peer.isPresentInGroup(input_parts[1]))
 			peer.addGroup(input_parts[1]);
-	}
+		}
 
-	else if (inputCommand == "upload_file" and answer)
-	{
-		if (!peer.isPresentInGroup(input_parts[2]))
-			peer.addGroup(input_parts[2]);
-		long filesize = stol(input_parts[3]);
-		AFile afile(input_parts[1], filesize);
-		peer.addFile(afile, input_parts[2]);
-	}
+		else if (inputCommand == "leave_group" and answer)
+		{
+			peer.deleteGroup(input_parts[1]);
+		}
 
-	else if (inputCommand == "logout" and answer)
-	{
-		tracker_login_status = false;
-	}
+		// else if (inputCommand == "download_file" and answer)
+		// {
+		// 	download_file(peerThreadObj, input_in_parts);
+		// }
 
-	else if (inputCommand == "stop_share" and answer)
-	{
-		peer.deleteSharedFile(input_parts[1], input_parts[2]);
-	}
+		else if (inputCommand == "list_files" and answer)
+		{
+			if (!peer.isPresentInGroup(input_parts[1]))
+				peer.addGroup(input_parts[1]);
+		}
+
+		else if (inputCommand == "upload_file" and answer)
+		{
+			if (!peer.isPresentInGroup(input_parts[2]))
+				peer.addGroup(input_parts[2]);
+			AFile afile;
+			afile.deserialize(input_parts[3]);
+			peer.addFile(afile, input_parts[2]);
+		}
+
+		else if (inputCommand == "logout" and answer)
+		{
+			tracker_login_status = false;
+		}
+
+		else if (inputCommand == "stop_share" and answer)
+		{
+			peer.deleteSharedFile(input_parts[1], input_parts[2]);
+		}
 	debug();
 }
 
 void debug()
 {
-	cerr << "peer" << endl;
-	cerr << peer.serializeDebug() << endl;
+	//cerr << "peer" << endl;
+	//cerr << peer.serializeDebug() << endl;
+}
+
+//###########
+//Peer-to-Peer connection portion -
+
+// mutex cout_mtx, //cerr_mtx;
+
+// void //safe_log(string s)
+// {
+// 	// lock_guard<mutex> lck(//cerr_mtx);
+// 	//cerr << s << endl;
+// }
+
+void peer_listener_helper()
+{
+	Socket currentPeer(peer_ip_address, peer_port);
+
+	currentPeer.startServerConnection();
+
+	while (true)
+	{
+		if (exit_flag)
+			break;
+		Socket different_peer;
+		currentPeer.acceptConnectionAtServer(&different_peer);
+		if (different_peer.socketDescriptor < 0)
+		{
+			cout << "Failed connection with: " << ntohs(different_peer.socketAddr.sin_port) << endl;
+			continue;
+		}
+		thread t(handle_peer, different_peer.socketDescriptor);
+
+		t.detach();
+	}
+	currentPeer.closeConnection();
+}
+
+bool send_away_chunk(char *buffer, int buffer_size, int socket_d)
+{
+	char *msg = buffer;
+	int num;
+	int fail_safe = 0, fail_break = 50;
+	while (buffer_size > 0)
+	{
+		num = send(socket_d, msg, buffer_size, 0);
+		//safe_log(msg);
+		if (num <= 0)
+		{
+			if (fail_safe >= fail_break)
+			{
+				// //safe_log("Left - " + to_string(buffer_size));
+				return false;
+			}
+			//safe_log("failed to recieve bytes - num - " + to_string(num) + ", fail_safe - " + to_string(fail_safe));
+			fail_safe++;
+			continue;
+		}
+		// //safe_log("sent bytes " + to_string(num));
+
+		msg += num;
+		buffer_size -= num;
+	}
+	// //cerr << "buffer sent: " << buffer << endl;
+	return true;
+}
+void error_send(int peer_socket)
+{
+	string msg = "##error";
+	send_away(msg, peer_socket);
+}
+
+string get_chunk_hash(char *buffer, long size)
+{
+	unsigned char hash[SHA_DIGEST_LENGTH]; // == 20
+
+	SHA1((unsigned char *)buffer, size, hash);
+
+	stringstream s;
+	for (int i = 0; i < 20; ++i)
+		s << hex << setfill('0') << setw(2) << (unsigned short)hash[i];
+
+	// lock_guard<mutex> lgd(//cerr_mtx);
+	//cerr << s.str() << endl;
+	return s.str();
+}
+
+char *get_file_chunk_buffer(string &filename, long starting_from_pos, int size_of_buffer)
+{
+	ifstream my_file(filename, ios::binary | ios::in);
+	if (!my_file.is_open())
+		return nullptr;
+	// my_file.clear();
+	my_file.seekg(starting_from_pos, ios::beg);
+
+	char *buffer = new char[size_of_buffer];
+
+	my_file.read(buffer, size_of_buffer);
+	my_file.close();
+	return buffer;
+}
+
+void send_chunk_response(int bytes_to_read, int peer_socket, char *buffer, string chunk_hash)
+{
+	string bytes = to_string(bytes_to_read);
+
+	send_away(bytes, peer_socket);
+
+	if (send_away_chunk(buffer, bytes_to_read, peer_socket))
+
+	{
+		send_away(chunk_hash, peer_socket);
+	}
+	else
+	{
+		//cerr << "error while sending chunk" << endl;
+	}
+}
+
+void handle_peer(int peer_socket)
+{
+	int bytes_recieved;
+	char request[MAX_LEN];
+	bytes_recieved = recv(peer_socket, request, sizeof(request), 0);
+	// //safe_log("Now Handling peer. msg recieved - " + string() + request);
+
+	if (bytes_recieved <= 0)
+	{
+		// //safe_log("Not recieved anything");
+		error_send(peer_socket);
+	}
+	else
+	{
+		auto input_parts = stringSplit(request, glbl_data_delimiter);
+
+		if (input_parts.size() < 2)
+		{
+			// //safe_log("msg sent is incorrect");
+			error_send(peer_socket);
+		}
+		else
+		{
+
+			string filename = input_parts[0];
+			int fileChunkNo = stoi(input_parts[1]);
+
+			if (!peer.hasFile(filename))
+			{
+				// //safe_log(filename + " File not registered in entry.");
+				error_send(peer_socket);
+			}
+			else
+			{
+
+				long file_size = peer.getFileObject(filename).getFileSize();
+
+				//find the total no of chunks of this file
+				int last_chunk_size = file_size % CHUNK_SIZE;
+				int total_chunks = (file_size / CHUNK_SIZE) + ((last_chunk_size) ? 1 : 0);
+
+				int bytes_to_read;
+
+				//check if the requested chunk is the last chunk
+				if (fileChunkNo == total_chunks - 1)
+				{
+					bytes_to_read = last_chunk_size;
+				}
+				else
+				{ //if it is not the last chunk
+					bytes_to_read = CHUNK_SIZE;
+				}
+
+				char *buffer = get_file_chunk_buffer(filename, fileChunkNo * CHUNK_SIZE, bytes_to_read);
+
+				if (!buffer)
+				{
+					//error condition
+					// //safe_log("file not found");
+					error_send(peer_socket);
+				}
+				else
+				{ //successfully fetched the buffer
+					string chunk_hash = get_chunk_hash(buffer, bytes_to_read);
+
+					send_chunk_response(bytes_to_read, peer_socket, buffer, chunk_hash);
+
+					delete[] buffer;
+					// //safe_log("now exiting handle_peer");
+					// this_thread::sleep_for(chrono::seconds(2));
+					shutdown(peer_socket, SHUT_WR);
+					while ((bytes_recieved = recv(peer_socket, request, sizeof(request), 0)) > 0)
+						;
+					// if (bytes_recieved == 0)
+					// 	// //safe_log("Now exiting properly");
+					// else
+					// //safe_log(to_string(bytes_recieved));
+				}
+			}
+		}
+	}
+	// do
+	// bytes_recieved = recv(peer_socket, request, sizeof(request), 0);
+	// while(not ((request[0] == '#' and request[1] == '#') or bytes_recieved==0));
+	//safe_log("ending due to " + string() + request + " -> " + to_string(bytes_recieved));
+	close(peer_socket);
+}
+
+struct peers
+{
+	int peer_id;
+	Peer peer_obj;
+
+	peers(int p_id, Peer peer_obj_) : peer_id(p_id), peer_obj(peer_obj_)
+	{
+	}
+};
+
+struct fileInfo
+{
+	AFile afile;				//File object
+	vector<bool> chunk_bit_map; //chunk vector
+	string group_name;
+};
+
+unordered_map<int, vector<thread>> all_peers_threads;
+
+unordered_map<int, vector<peers>> all_peers_ptrs;
+
+unordered_map<int, fileInfo> file_meta_vector;
+
+mutex all_peers_ptrs_mtx, all_peers_threads_mtx, file_meta_vector_mtx;
+
+int calculate_next_peer(int peer_id, int total)
+{
+	return (peer_id + 1) % (total);
+}
+
+bool file_creation(string file_name)
+{
+	ofstream ff(file_name);
+	if (!ff.is_open())
+	{
+		return false;
+	}
+
+	ff.close();
+	return true;
+}
+
+void download_handler(int, int);
+int seed = 0;
+
+void download_manager(int peer_to_tracker_socket_descriptor, vector<string> &input_parts)
+{
+	AFile afile;
+	if (!(afile.deserialize(input_parts[2]) and file_creation(afile.getFileName())))
+	{
+		//cerr << "error while downloading file meta deserialization" << endl;
+		clear_print("Download failed");
+		return;
+	}
+
+	auto peer_list = stringSplit(input_parts[3], peer_list_delimiter);
+	seed++;
+	int peer_list_size = peer_list.size();
+
+	int pid = 0;
+	for (auto peer_info : peer_list)
+	{
+		Peer peer;
+		peer.deserializeData2(peer_info);
+		peers peer_(pid, peer);
+		lock_guard<mutex> grd(all_peers_ptrs_mtx);
+		all_peers_ptrs[seed].push_back(peer_);
+		pid++;
+	}
+	file_meta_vector[seed].group_name = input_parts[1];
+	file_meta_vector[seed].afile = afile;
+	peer.addDownload(input_parts[1], afile.getFileName());
+	thread t(download_handler, seed, peer_to_tracker_socket_descriptor);
+	t.detach();
+	// t.join();
+}
+
+void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size);
+
+void download_handler(int id, int peer_to_tracker_socket_descriptor)
+{
+	// unique_lock<mutex> ulk_//cerr(//cerr_mtx);
+	//cerr << "inside download handler - " << id << endl;
+	// ulk_//cerr.unlock();
+
+	// ulk_//cerr.lock();
+	// for (int i = 0; i < all_peers_ptrs[id].size(); i++)
+	//cerr << all_peers_ptrs[id][i].peer_obj.serializeData2() << peer_list_delimiter;
+	//cerr << endl;
+	// ulk_//cerr.unlock();
+
+	int peer_list_size = all_peers_ptrs[id].size();
+
+	string filename = file_meta_vector[id].afile.getFileName();
+	long file_size = file_meta_vector[id].afile.getFileSize();
+
+	int one_chunk_size = CHUNK_SIZE;
+	int last_chunk_size = file_size % one_chunk_size;
+	int total_chunks = (file_size / one_chunk_size) + ((last_chunk_size) ? 1 : 0);
+
+	unique_lock<mutex> uck(file_meta_vector_mtx);
+	// file_meta_vector[id].first = &file_obj;
+	file_meta_vector[id].chunk_bit_map.resize(total_chunks, false);
+	uck.unlock();
+
+	//cerr << "Total chunks for file: " << filename << " are " << total_chunks << " and last chunk size is " << last_chunk_size << endl;
+
+	for (int chunk_no = 0, peer_id = 0; chunk_no < total_chunks; chunk_no++, peer_id = calculate_next_peer(peer_id, peer_list_size))
+	{
+		if (chunk_no == total_chunks - 1 and last_chunk_size)
+			one_chunk_size = last_chunk_size;
+		thread th(chunk_download_handler, id, chunk_no, peer_id, one_chunk_size);
+		// unique_lock<mutex> lcd_guard(all_peers_threads_mtx);
+		all_peers_threads[id].push_back(move(th));
+		// lcd_guard.unlock();
+
+		// //safe_log("in loop, chunk " + to_string(chunk_no) + ", with peer " + to_string(peer_id));
+		// th.join();
+	}
+
+	// unique_lock<mutex> ucK(all_peers_threads_mtx);
+	for (int cnt = 0; cnt < all_peers_threads[id].size(); cnt++)
+	{
+		if (all_peers_threads[id][cnt].joinable())
+			all_peers_threads[id][cnt].join();
+		// else
+		//cerr << "can\'t join - " << cnt << endl;
+	}
+	// uck.unlock();
+
+	//cerr << "Now all threads are over " << endl;
+	string status;
+
+	bool flag = false;
+	vector<int> chunks_failed;
+	int chunk_id = 0;
+	for (auto chunk_set : file_meta_vector[id].chunk_bit_map)
+	{
+		if (!chunk_set)
+		{
+			flag = true;
+			// break;
+			chunks_failed.push_back(chunk_id);
+		}
+		chunk_id++;
+	}
+
+	if (flag)
+	{
+		clear_print("Download failed ...");
+		//download failed
+		//delete the file to be downloaded
+		//cerr << "Failed to download the chunks:" << endl;
+		for (auto i : chunks_failed)
+			//cerr << i << " ";
+			//cerr << endl;
+			status = 'F';
+
+		file_remove(filename);
+	}
+	else
+	{
+		// findSizeOfFile(filename);
+		string file_hash_recieved = file_meta_vector[id].afile.getFileHash();
+		string file_downloaded_hash = pass_file_to_hash_function(filename, file_size);
+		if (matchHash(id, file_downloaded_hash, file_hash_recieved))
+		{
+			//download successful
+			//cerr << "Download successful " << endl;
+			clear_print("Downloading of file: " + filename + " complete.");
+			//cerr << "now sending info to tracker" << endl;
+			string message = secret_prefix + glbl_data_delimiter + "download_complete" + glbl_data_delimiter + file_meta_vector[id].group_name + glbl_data_delimiter + filename;
+			peer.addFile(file_meta_vector[id].afile, file_meta_vector[id].group_name);
+			send_away(message, peer_to_tracker_socket_descriptor);
+			status = 'C';
+		}
+		else
+		{
+			//cerr << "File hash found different. Deleting file " << endl;
+			clear_print("Download Failed");
+			file_remove(filename);
+			status = 'F';
+		}
+	}
+	peer.setDownloadStatus(status, file_meta_vector[id].group_name, filename);
+
+	all_peers_threads.erase(id);
+	all_peers_ptrs.erase(id);
+	file_meta_vector.erase(id);
+}
+
+void file_remove(string &filename)
+{
+	if (remove(filename.c_str()) != 0)
+		cerr << "File: " << filename << " not removed." << endl;
+	else
+		cerr << "file removed";
+}
+
+bool matchHash(int id, string hash_calculated, string hash_from_peer)
+{
+	for (int i = 0; i < SHA_DIGEST_LENGTH; i++)
+	{
+		if (hash_from_peer[i] != hash_calculated[i])
+		{
+			// //safe_log("hash found different of chunk - " + to_string(id));
+			return false;
+		}
+	}
+	// //safe_log("hash matched of chunk - " + to_string(id));
+	return true;
+}
+
+bool write_in_file(int id, int chunk_no, char *buffer, int size)
+{
+	string filename = file_meta_vector[id].afile.getFileName();
+	ofstream file_obj(filename, ios::binary | ios::out | ios::in);
+
+	// ulk_//cerr.lock();
+	if (file_obj.is_open())
+	{
+		// //safe_log("successfully opened file for chunk - " + to_string(chunk_no));
+		file_obj.seekp(chunk_no * CHUNK_SIZE, ios::beg);
+		file_obj.write(buffer, size);
+		file_obj.close();
+		return true;
+	}
+	else
+	{
+		// unique_lock<mutex> ulk_cout(cout_mtx);
+		// //safe_log("error while opening file");
+		// cout << "error while downloading file." << endl;
+	}
+	// ulk_//cerr.unlock();
+	// //safe_log("failed file_writing for chunk - " + chunk_no);
+	return false;
+}
+
+bool recieve_chunk(int socket_descriptor, char *buffer, int size)
+{
+	// //safe_log("now recieving chunk..");
+	int num;
+	char *pbuf = buffer;
+	int fail_safe = 0, fail_break_at = 50;
+	while (size > 0)
+	{
+		num = recv(socket_descriptor, pbuf, size, 0);
+		//safe_log(pbuf);
+		if (num <= 0)
+		{
+			if (fail_safe >= fail_break_at)
+			{
+				//safe_log("Left - " + to_string(size) + " and num - " + to_string(num));
+				return false;
+			}
+			//safe_log("failed to recieve bytes - num - " + to_string(num) + ", fail_safe - " + to_string(fail_safe));
+			fail_safe++;
+			continue;
+		}
+		// //cerr << pbuf << endl;
+		// //safe_log("recieved bytes " + to_string(num));
+
+		pbuf += num;
+		size -= num;
+	}
+	return true;
+}
+
+void chunk_download_handler(int id, int chunk_no, int peer_id, int chunk_size)
+{
+	// //safe_log("starting for chunk - " + to_string(chunk_no) + " for peer " + to_string(peer_id));
+	int total_peers = all_peers_ptrs[id].size();
+	int fail_safe_total = 8 * total_peers;
+	int fail_safe_cnt = 0;
+	Peer *peer_;
+	string ip_address, port;
+	char *buffer = new char[chunk_size];
+	// char buffer[chunk_size];
+	Socket *sckt_ptr;
+	while (fail_safe_cnt < fail_safe_total)
+	{
+		// //safe_log("starting with peer:" + to_string(peer_id));
+		Socket chunk_socket;
+		sckt_ptr = &chunk_socket;
+		peer_ = &all_peers_ptrs[id][peer_id].peer_obj;
+		ip_address = peer_->getIPAdress();
+		port = peer_->getPortNo();
+		Socket peer_socket(ip_address, port);
+
+		if (peer_socket.connectAtClient(chunk_socket.socketDescriptor) != 0)
+		{
+			stringstream ss;
+			ss << "failed to connect with peer:" << peer_id << " for chunk:" << chunk_no;
+			// //safe_log(ss.str());
+		}
+		else
+		{
+			string msg = file_meta_vector[id].afile.getFileName() + glbl_data_delimiter + to_string(chunk_no);
+			send_away(msg, chunk_socket.socketDescriptor);
+			char response[MAX_LEN];
+			recv(chunk_socket.socketDescriptor, response, sizeof(response), 0);
+			if (response[0] == '#' and response[1] == '#')
+			{
+				// //safe_log("problem at peer occured ");
+			}
+			else
+			{
+				// int bytes_rec = recv(chunk_socket.socketDescriptor, buffer, sizeof(buffer), 0);
+
+				if (!recieve_chunk(chunk_socket.socketDescriptor, buffer, chunk_size))
+				{
+					// //safe_log("Failed to recieve chunk " + to_string(chunk_no) + " in try " + to_string(fail_safe_cnt));
+				}
+				else
+				{
+					//safe_log(buffer);
+					// //cerr << buffer << endl;
+					string hash_calculated = get_chunk_hash(buffer, chunk_size);
+					char hash_from_peer[SHA_DIGEST_LENGTH];
+					recv(chunk_socket.socketDescriptor, hash_from_peer, sizeof(hash_from_peer), 0);
+
+					if (
+						matchHash(chunk_no, hash_calculated, hash_from_peer) and
+						write_in_file(id, chunk_no, buffer, chunk_size))
+					{
+						file_meta_vector[id].chunk_bit_map[chunk_no] = true;
+						// //safe_log("completed for chunk - " + to_string(chunk_no));
+						break;
+					}
+					// else
+					// //safe_log("error while matching hash or writing into file");
+				}
+			}
+		}
+		// 	string message = "##done";
+		// send_away(message, chunk_socket.socketDescriptor);
+		// shutdown(peer_socket, SHUT_WR);
+
+		chunk_socket.closeConnection();
+
+		peer_id = calculate_next_peer(peer_id, total_peers);
+		fail_safe_cnt++;
+		if (fail_safe_cnt % total_peers == 0)
+			this_thread::sleep_for(chrono::seconds(1));
+	}
+	// string message = "##done";
+	// send_away(message, chunk_socket.socketDescriptor);
+	delete[] buffer;
+	// shutdown(peer_socket, SHUT_WR);
+	sckt_ptr->closeConnection();
 }
